@@ -126,6 +126,30 @@ restart_singbox_service() {
   systemctl restart sing-box
 }
 
+save_reality_meta() {
+  local connect_host="$1"
+  local listen_port="$2"
+  local server_name="$3"
+  local public_key="$4"
+  local short_id="$5"
+
+  cat > "${META_FILE}" <<JSON
+{
+  "connect_host": "${connect_host}",
+  "listen_port": ${listen_port},
+  "server_name": "${server_name}",
+  "public_key": "${public_key}",
+  "short_id": "${short_id}",
+  "flow": "xtls-rprx-vision",
+  "type": "tcp",
+  "security": "reality",
+  "fingerprint": "${DEFAULT_CLIENT_FP}"
+}
+JSON
+
+  chmod 600 "${META_FILE}" 2>/dev/null || true
+}
+
 deploy_vless_reality() {
   need_root
 
@@ -258,6 +282,8 @@ JSON
     pause_enter
     return 1
   fi
+  
+  save_reality_meta "${connect_host}" "${listen_port}" "${server_name}" "${public_key}" "${short_id}"
 
   ok "VLESS + Reality 部署完成"
   echo
