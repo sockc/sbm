@@ -1,388 +1,432 @@
 #!/usr/bin/env bash
 
 require_outbound_manage_env() {
-  require_config_file || return 1
   require_python3 || return 1
+  mkdir -p "${TMP_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}"
 }
 
-prompt_outbound_port() {
-  local port
-  while true; do
-    port="$(prompt_default "请输入上游端口" "443")"
-    case "$port" in
-      ''|*[!0-9]*)
-        echo "输入无效：端口必须是 1-65535 的数字"
-        ;;
-      *)
-        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-          printf '%s\n' "$port"
-          return 0
-        fi
-        echo "输入无效：端口必须是 1-65535"
-        ;;
-    esac
-  done
+list_source_meta_files() {
+  ls -1t "${SOURCES_DIR}"/source-*.json 2>/dev/null || true
 }
 
-default_next_outbound_tag() {
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys, re
+get_source_meta_path_by_index() {
+  local idx="$1"
+  list_source_meta_files | sed -n "${idx}p"
+}
 
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+default_next_source_name() {
+  python3 - "${SOURCES_DIR}" <<'PY'
+import glob, os, sys
+files = glob.glob(os.path.join(sys.argv[1], "source-*.json"))
+print(f"source{len(files) + 1}")
+PY
+}
+
+next_source_id() {
+  python3 - "${SOURCES_DIR}" <<'PY'
+import glob, os, re, sys
 nums = []
-
-for ob in cfg.get("outbounds", []):
-    tag = ob.get("tag", "")
-    m = re.fullmatch(r"proxy(\d+)", tag)
+for path in glob.glob(os.path.join(sys.argv[1], "source-*.json")):
+    m = re.search(r"source-(\d+)\.json$", os.path.basename(path))
     if m:
         nums.append(int(m.group(1)))
-
 n = 1
 while n in nums:
     n += 1
-
-print(f"proxy{n}")
+print(f"source-{n:03d}")
 PY
 }
 
-list_vmess_outbounds_rows() {
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+read_source_meta_fields() {
+  local meta_path="$1"
+  python3 - "${meta_path}" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(meta.get("id", ""))
+print(meta.get("name", ""))
+print(meta.get("type", ""))
+print(meta.get("location", ""))
+print(meta.get("enabled", True))
+print(meta.get("node_count", 0))
+print(meta.get("last_update", ""))
+PY
+}
+
+create_source_meta_file() {
+  local meta_path="$1"
+  local source_id="$2"
+  local source_name="$3"
+  local source_type="$4"
+  local location="$5"
+
+  python3 - "${meta_path}" "${source_id}" "${source_name}" "${source_type}" "${location}" <<'PY'
+import json, sys
+path, source_id, name, source_type, location = sys.argv[1:]
+meta = {
+    "id": source_id,
+    "name": name,
+    "type": source_type,
+    "location": location,
+    "enabled": True,
+    "node_count": 0,
+    "last_update": "",
+}
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(meta, f, ensure_ascii=False, indent=2)
+PY
+}
+
+update_source_meta_success() {
+  local meta_path="$1"
+  local node_count="$2"
+
+  python3 - "${meta_path}" "${node_count}" "$(date -Iseconds)" <<'PY'
+import json, sys
+path, node_count, last_update = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+meta = json.load(open(path, 'r', encoding='utf-8'))
+meta["node_count"] = node_count
+meta["last_update"] = last_update
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(meta, f, ensure_ascii=False, indent=2)
+PY
+}
+
+normalize_source_raw_to_cache() {
+  local raw_file="$1"
+  local cache_file="$2"
+
+  python3 - "${raw_file}" "${cache_file}" <<'PY'
 import json, sys
 
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-final = cfg.get("route", {}).get("final", "direct")
+raw_path, cache_path = sys.argv[1], sys.argv[2]
 
-rows = []
-for ob in cfg.get("outbounds", []):
-    if ob.get("type") != "vmess":
+SUPPORTED = {
+    "socks",
+    "http",
+    "shadowsocks",
+    "vmess",
+    "trojan",
+    "wireguard",
+    "hysteria",
+    "vless",
+    "shadowtls",
+    "tuic",
+    "hysteria2",
+    "anytls",
+    "tor",
+    "ssh",
+    "naive",
+}
+
+data = json.load(open(raw_path, 'r', encoding='utf-8'))
+
+if isinstance(data, dict):
+    if isinstance(data.get("outbounds"), list):
+        items = data["outbounds"]
+    elif "type" in data:
+        items = [data]
+    else:
+        print("输入内容不是可识别的 sing-box 配置/节点格式", file=sys.stderr)
+        raise SystemExit(1)
+elif isinstance(data, list):
+    items = data
+else:
+    print("输入内容不是 JSON 对象或数组", file=sys.stderr)
+    raise SystemExit(1)
+
+result = []
+for item in items:
+    if not isinstance(item, dict):
         continue
-    rows.append({
-        "tag": ob.get("tag", ""),
-        "server": ob.get("server", ""),
-        "server_port": ob.get("server_port", ""),
-        "security": ob.get("security", ""),
-        "is_default": "*" if ob.get("tag") == final else ""
-    })
+    typ = item.get("type", "")
+    if typ not in SUPPORTED:
+        continue
+    result.append(item)
 
-for i, row in enumerate(rows, 1):
-    print(f"{i}\t{row['tag']}\t{row['server']}\t{row['server_port']}\t{row['security']}\t{row['is_default']}")
+with open(cache_path, 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+
+print(len(result))
 PY
 }
 
-show_vmess_outbounds() {
+update_source_from_meta_path() {
+  require_outbound_manage_env || return 1
+
+  local meta_path="$1"
+  local raw_file source_id source_name source_type location
+  local cache_file count
+  raw_file="${TMP_DIR}/source-raw.json"
+
+  mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+  source_id="${_src_meta[0]:-}"
+  source_name="${_src_meta[1]:-}"
+  source_type="${_src_meta[2]:-}"
+  location="${_src_meta[3]:-}"
+
+  if [ -z "${source_id}" ] || [ -z "${source_type}" ] || [ -z "${location}" ]; then
+    err "节点源元数据无效：${meta_path}"
+    return 1
+  fi
+
+  case "${source_type}" in
+    url)
+      if ! fetch_to_file "${location}" "${raw_file}"; then
+        err "下载订阅失败：${location}"
+        return 1
+      fi
+      ;;
+    file)
+      if [ ! -f "${location}" ]; then
+        err "本地文件不存在：${location}"
+        return 1
+      fi
+      cp -f "${location}" "${raw_file}"
+      ;;
+    *)
+      err "未知节点源类型：${source_type}"
+      return 1
+      ;;
+  esac
+
+  cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+
+  if ! count="$(normalize_source_raw_to_cache "${raw_file}" "${cache_file}")"; then
+    err "解析 sing-box 节点失败：${source_name}"
+    return 1
+  fi
+
+  update_source_meta_success "${meta_path}" "${count}" || return 1
+  ok "节点源更新成功：${source_name}（${count} 个节点）"
+  return 0
+}
+
+show_outbound_sources() {
   require_outbound_manage_env || return 1
 
   local found=0
-  local current_final
-  current_final="$(python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-print(cfg.get("route", {}).get("final", "direct"))
-PY
-)"
+  echo "编号 ID           名称             类型   节点数  最后更新"
+  echo "--------------------------------------------------------------------------"
 
-  echo "当前默认出站: ${current_final}"
-  echo "编号 标签            服务器               端口    加密        默认"
-  echo "------------------------------------------------------------------"
-
-  while IFS=$'\t' read -r idx tag server port security mark; do
-    [ -z "${idx}" ] && continue
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
     found=1
-    printf '%-4s %-15s %-20s %-7s %-10s %s\n' "$idx" "$tag" "$server" "$port" "$security" "$mark"
-  done < <(list_vmess_outbounds_rows)
+
+    mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+    printf '%-4s %-12s %-16s %-6s %-7s %s\n' \
+      "$found" \
+      "${_src_meta[0]:-}" \
+      "${_src_meta[1]:-}" \
+      "${_src_meta[2]:-}" \
+      "${_src_meta[5]:-0}" \
+      "${_src_meta[6]:-<未更新>}"
+    found=$((found + 1))
+  done < <(list_source_meta_files)
 
   if [ "$found" -eq 0 ]; then
-    echo "暂无 VMess 上游"
+    echo "暂无节点源"
   fi
 
-  echo "------------------------------------------------------------------"
+  echo "--------------------------------------------------------------------------"
+  echo
+  echo "详细位置："
+
+  local idx=1
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
+    mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+    echo "[$idx] ${_src_meta[1]:-} -> ${_src_meta[3]:-}"
+    idx=$((idx + 1))
+  done < <(list_source_meta_files)
 }
 
-get_vmess_outbound_tag_by_index() {
-  local idx="$1"
-  python3 - "${CONFIG_DIR}/config.json" "$idx" <<'PY'
-import json, sys
-
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-idx = int(sys.argv[2])
-
-items = [ob for ob in cfg.get("outbounds", []) if ob.get("type") == "vmess"]
-
-if idx < 1 or idx > len(items):
-    print("索引越界", file=sys.stderr)
-    raise SystemExit(1)
-
-print(items[idx - 1].get("tag", ""))
-PY
-}
-
-add_vmess_outbound() {
+add_subscription_url_source() {
   require_outbound_manage_env || return 1
-  mkdir -p "${TMP_DIR}"
 
-  local tag server server_port uuid security alter_id network set_default tmp_file
-  local use_tls insecure server_name packet_encoding
+  local source_name url source_id meta_path
+  source_name="$(prompt_default "请输入节点源名称" "$(default_next_source_name)")"
+  url="$(prompt_required "请输入 sing-box 订阅 URL")"
+  source_id="$(next_source_id)"
+  meta_path="${SOURCES_DIR}/${source_id}.json"
 
-  tag="$(prompt_default "请输入上游标签" "$(default_next_outbound_tag)")"
-  server="$(prompt_required "请输入上游服务器地址")"
-  server_port="$(prompt_outbound_port)"
-  uuid="$(prompt_required "请输入上游 UUID")"
-  security="$(prompt_default "请输入 VMess security" "none")"
-  alter_id="$(prompt_default "请输入 alter_id" "0")"
-  network="$(prompt_default "请输入 network" "tcp")"
-
-  if confirm_default_no "启用 TLS 吗？"; then
-    use_tls="true"
-    server_name="$(prompt_default "请输入 TLS server_name" "$server")"
-    if confirm_default_no "允许不校验证书 insecure 吗？"; then
-      insecure="true"
-    else
-      insecure="false"
-    fi
-  else
-    use_tls="false"
-    server_name=""
-    insecure="false"
-  fi
-
-  if [ "$network" = "udp" ]; then
-    packet_encoding="$(prompt_default "请输入 packet_encoding" "xudp")"
-  else
-    packet_encoding=""
-  fi
-
-  if confirm_default_yes "设为默认出站吗？"; then
-    set_default="true"
-  else
-    set_default="false"
-  fi
+  create_source_meta_file "${meta_path}" "${source_id}" "${source_name}" "url" "${url}" || {
+    err "创建节点源失败"
+    pause_enter
+    return 1
+  }
 
   echo
-  echo "========== 上游预览 =========="
-  echo "标签            : ${tag}"
-  echo "服务器          : ${server}"
-  echo "端口            : ${server_port}"
-  echo "UUID            : ${uuid}"
-  echo "security        : ${security}"
-  echo "alter_id        : ${alter_id}"
-  echo "network         : ${network}"
-  echo "TLS             : ${use_tls}"
-  [ "$use_tls" = "true" ] && echo "server_name     : ${server_name}"
-  [ "$use_tls" = "true" ] && echo "insecure        : ${insecure}"
-  [ -n "$packet_encoding" ] && echo "packet_encoding : ${packet_encoding}"
-  echo "设为默认出站    : ${set_default}"
-  echo "=============================="
-  echo
-
-  if ! confirm_default_yes "确认添加该 VMess 上游吗？"; then
-    warn "已取消"
-    pause_enter
-    return 0
-  fi
-
-  tmp_file="${TMP_DIR}/config.add-vmess-outbound.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$tag" "$server" "$server_port" "$uuid" "$security" "$alter_id" "$network" "$use_tls" "$server_name" "$insecure" "$packet_encoding" "$set_default" <<'PY'
-import json, sys
-
-(
-    path, tag, server, server_port, uuid, security, alter_id, network,
-    use_tls, server_name, insecure, packet_encoding, set_default
-) = sys.argv[1:]
-
-server_port = int(server_port)
-alter_id = int(alter_id)
-use_tls = (use_tls == "true")
-insecure = (insecure == "true")
-set_default = (set_default == "true")
-
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-outbounds = cfg.setdefault("outbounds", [])
-
-for ob in outbounds:
-    if ob.get("tag") == tag:
-        print(f"出站标签已存在: {tag}", file=sys.stderr)
-        raise SystemExit(1)
-
-new_ob = {
-    "type": "vmess",
-    "tag": tag,
-    "server": server,
-    "server_port": server_port,
-    "uuid": uuid,
-    "security": security,
-    "alter_id": alter_id,
-    "network": network
-}
-
-if use_tls:
-    new_ob["tls"] = {
-        "enabled": True,
-        "server_name": server_name,
-        "insecure": insecure
-    }
-
-if packet_encoding:
-    new_ob["packet_encoding"] = packet_encoding
-
-outbounds.append(new_ob)
-
-route = cfg.setdefault("route", {})
-route.setdefault("final", "direct")
-if set_default:
-    route["final"] = tag
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "添加上游失败"
-    pause_enter
-    return 1
-  fi
-
-  if ! check_config_file "${tmp_file}"; then
-    err "配置校验失败，未写入正式配置"
-    pause_enter
-    return 1
-  fi
-
-  activate_config_file "${tmp_file}"
-
-  if ! restart_singbox_service; then
-    err "服务重启失败"
-    pause_enter
-    return 1
-  fi
-
-  ok "VMess 上游添加成功：${tag}"
-  pause_enter
-}
-
-delete_vmess_outbound() {
-  require_outbound_manage_env || return 1
-  mkdir -p "${TMP_DIR}"
-
-  show_vmess_outbounds
-  echo
-
-  local idx tmp_file
-  idx="$(prompt_required "请输入要删除的上游编号")"
-
-  if ! confirm_default_no "确认删除该上游吗？"; then
-    warn "已取消"
-    pause_enter
-    return 0
-  fi
-
-  tmp_file="${TMP_DIR}/config.del-vmess-outbound.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$idx" <<'PY'
-import json, sys
-
-path, idx = sys.argv[1], int(sys.argv[2])
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-outbounds = cfg.get("outbounds", [])
-vmess_indexes = [i for i, ob in enumerate(outbounds) if ob.get("type") == "vmess"]
-
-if idx < 1 or idx > len(vmess_indexes):
-    print("编号超出范围", file=sys.stderr)
-    raise SystemExit(1)
-
-real_idx = vmess_indexes[idx - 1]
-removed_tag = outbounds[real_idx].get("tag", "")
-outbounds.pop(real_idx)
-
-route = cfg.setdefault("route", {})
-if route.get("final") == removed_tag:
-    route["final"] = "direct"
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "删除上游失败"
-    pause_enter
-    return 1
-  fi
-
-  if ! check_config_file "${tmp_file}"; then
-    err "配置校验失败，未写入正式配置"
-    pause_enter
-    return 1
-  fi
-
-  activate_config_file "${tmp_file}"
-
-  if ! restart_singbox_service; then
-    err "服务重启失败"
-    pause_enter
-    return 1
-  fi
-
-  ok "VMess 上游删除成功"
-  pause_enter
-}
-
-set_default_outbound() {
-  require_outbound_manage_env || return 1
-  mkdir -p "${TMP_DIR}"
-
-  show_vmess_outbounds
-  echo
-  echo "输入 0 表示切回 direct"
-  echo
-
-  local idx tag tmp_file
-  idx="$(prompt_default "请输入要设为默认出站的编号" "0")"
-
-  if [ "$idx" = "0" ]; then
-    tag="direct"
-  else
-    tag="$(get_vmess_outbound_tag_by_index "$idx")" || {
-      err "读取上游标签失败"
+  echo "已新增 URL 节点源：${source_name}"
+  if confirm_default_yes "现在立即更新并解析该节点源吗？"; then
+    update_source_from_meta_path "${meta_path}" || {
       pause_enter
       return 1
     }
   fi
 
-  tmp_file="${TMP_DIR}/config.set-final.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  pause_enter
+}
 
-  if ! python3 - "${tmp_file}" "$tag" <<'PY'
+import_local_singbox_file_source() {
+  require_outbound_manage_env || return 1
+
+  local source_name file_path source_id meta_path
+  source_name="$(prompt_default "请输入节点源名称" "$(default_next_source_name)")"
+  file_path="$(prompt_required "请输入本地 sing-box 文件路径")"
+
+  if [ ! -f "${file_path}" ]; then
+    err "文件不存在：${file_path}"
+    pause_enter
+    return 1
+  fi
+
+  source_id="$(next_source_id)"
+  meta_path="${SOURCES_DIR}/${source_id}.json"
+
+  create_source_meta_file "${meta_path}" "${source_id}" "${source_name}" "file" "${file_path}" || {
+    err "创建节点源失败"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "已新增本地文件节点源：${source_name}"
+  if confirm_default_yes "现在立即更新并解析该节点源吗？"; then
+    update_source_from_meta_path "${meta_path}" || {
+      pause_enter
+      return 1
+    }
+  fi
+
+  pause_enter
+}
+
+update_one_source() {
+  require_outbound_manage_env || return 1
+
+  show_outbound_sources
+  echo
+
+  local idx meta_path
+  idx="$(prompt_required "请输入要更新的节点源编号")"
+  meta_path="$(get_source_meta_path_by_index "${idx}")"
+
+  if [ -z "${meta_path}" ] || [ ! -f "${meta_path}" ]; then
+    err "节点源编号无效"
+    pause_enter
+    return 1
+  fi
+
+  update_source_from_meta_path "${meta_path}" || {
+    pause_enter
+    return 1
+  }
+
+  pause_enter
+}
+
+update_all_sources() {
+  require_outbound_manage_env || return 1
+
+  local total=0 ok_count=0
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
+    total=$((total + 1))
+    if update_source_from_meta_path "${meta_path}"; then
+      ok_count=$((ok_count + 1))
+    fi
+  done < <(list_source_meta_files)
+
+  echo
+  echo "更新完成：${ok_count}/${total}"
+  pause_enter
+}
+
+preview_source_nodes() {
+  require_outbound_manage_env || return 1
+
+  show_outbound_sources
+  echo
+
+  local idx meta_path source_id source_name cache_file
+  idx="$(prompt_required "请输入要预览的节点源编号")"
+  meta_path="$(get_source_meta_path_by_index "${idx}")"
+
+  if [ -z "${meta_path}" ] || [ ! -f "${meta_path}" ]; then
+    err "节点源编号无效"
+    pause_enter
+    return 1
+  fi
+
+  mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+  source_id="${_src_meta[0]:-}"
+  source_name="${_src_meta[1]:-}"
+  cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+
+  if [ ! -f "${cache_file}" ]; then
+    err "尚未找到缓存节点，请先更新该节点源"
+    pause_enter
+    return 1
+  fi
+
+  echo "节点源：${source_name}"
+  echo "缓存文件：${cache_file}"
+  echo
+
+  python3 - "${cache_file}" <<'PY'
 import json, sys
 
-path, tag = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-cfg.setdefault("route", {})["final"] = tag
+items = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
+print("编号 类型         标签                  服务器")
+print("----------------------------------------------------------------")
+
+for i, ob in enumerate(items, 1):
+    typ = ob.get("type", "")
+    tag = ob.get("tag", "")
+    server = ob.get("server", "") or ob.get("server_name", "") or ob.get("address", "") or ob.get("endpoint", "")
+    port = ob.get("server_port", "") or ob.get("port", "")
+    if server and port:
+        endpoint = f"{server}:{port}"
+    else:
+        endpoint = server or "<未知>"
+    print(f"{i:<4} {typ:<12} {tag[:20]:<22} {endpoint}")
+print("----------------------------------------------------------------")
+print(f"共 {len(items)} 个可导入节点")
 PY
-  then
-    err "设置默认出站失败"
+
+  pause_enter
+}
+
+delete_source() {
+  require_outbound_manage_env || return 1
+
+  show_outbound_sources
+  echo
+
+  local idx meta_path source_id cache_file
+  idx="$(prompt_required "请输入要删除的节点源编号")"
+  meta_path="$(get_source_meta_path_by_index "${idx}")"
+
+  if [ -z "${meta_path}" ] || [ ! -f "${meta_path}" ]; then
+    err "节点源编号无效"
     pause_enter
     return 1
   fi
 
-  if ! check_config_file "${tmp_file}"; then
-    err "配置校验失败，未写入正式配置"
+  mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+  source_id="${_src_meta[0]:-}"
+  cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+
+  echo "准备删除节点源：${_src_meta[1]:-}"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
     pause_enter
-    return 1
+    return 0
   fi
 
-  activate_config_file "${tmp_file}"
-
-  if ! restart_singbox_service; then
-    err "服务重启失败"
-    pause_enter
-    return 1
-  fi
-
-  ok "默认出站已切换为：${tag}"
+  rm -f "${meta_path}" "${cache_file}"
+  ok "节点源已删除"
   pause_enter
 }
 
@@ -390,21 +434,27 @@ menu_outbound_management() {
   while true; do
     clear
     echo "======================================"
-    echo "             出站管理"
+    echo "              出站管理"
     echo "======================================"
-    echo "1. 添加 VMess 上游"
-    echo "2. 删除 VMess 上游"
-    echo "3. 查看上游"
-    echo "4. 设置默认出站"
+    echo "1. 添加订阅 URL 源"
+    echo "2. 导入本地 sing-box 文件"
+    echo "3. 查看节点源"
+    echo "4. 更新指定节点源"
+    echo "5. 更新全部节点源"
+    echo "6. 预览导入节点"
+    echo "7. 删除节点源"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-4]: " choice
+    read -r -p "请选择 [0-7]: " choice
     case "${choice:-}" in
-      1) add_vmess_outbound ;;
-      2) delete_vmess_outbound ;;
-      3) show_vmess_outbounds; pause_enter ;;
-      4) set_default_outbound ;;
+      1) add_subscription_url_source ;;
+      2) import_local_singbox_file_source ;;
+      3) show_outbound_sources; pause_enter ;;
+      4) update_one_source ;;
+      5) update_all_sources ;;
+      6) preview_source_nodes ;;
+      7) delete_source ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
