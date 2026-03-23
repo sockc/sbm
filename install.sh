@@ -49,6 +49,7 @@ main() {
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/inbound.sh" "$INSTALL_DIR/lib/inbound.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/export.sh" "$INSTALL_DIR/lib/export.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/user.sh" "$INSTALL_DIR/lib/user.sh"
+  install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/outbound.sh" "$INSTALL_DIR/lib/outbound.sh"
 
   # 先预留，后面做出站管理时不会再漏
   if fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/outbound.sh" >/dev/null 2>&1; then
