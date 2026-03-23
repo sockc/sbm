@@ -18,6 +18,7 @@ source "${BASE_DIR}/lib/inbound.sh"
 source "${BASE_DIR}/lib/export.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/user.sh"
+source "${BASE_DIR}/lib/outbound.sh"
 
 show_header() {
   clear
@@ -51,7 +52,7 @@ main_menu() {
     echo "2. 部署 VLESS + Reality"
     echo "3. 用户管理"
     echo "4. 导出客户端 URI"
-    echo "5. 出站管理（占位）"
+    echo "5. 出站管理"
     echo "6. 服务状态"
     echo "0. 退出"
     echo
@@ -62,7 +63,7 @@ main_menu() {
       2) menu_deploy_vless_reality ;;
       3) menu_user_management ;;
       4) menu_export_client ;;
-      5) echo "暂未实现"; pause_enter ;;
+      5) menu_outbound_management ;;
       6) show_service_status; pause_enter ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
