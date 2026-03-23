@@ -20,6 +20,7 @@ source "${BASE_DIR}/lib/export.sh"
 source "${BASE_DIR}/lib/user.sh"
 source "${BASE_DIR}/lib/outbound.sh"
 source "${BASE_DIR}/lib/firewall.sh"
+source "${BASE_DIR}/lib/backup.sh"
 
 show_header() {
   clear
@@ -55,11 +56,12 @@ main_menu() {
     echo "4. 导出客户端 URI"
     echo "5. 出站管理"
     echo "6. 防火墙管理"
-    echo "7. 服务状态"
+    echo "7. 备份与恢复"
+    echo "8. 服务状态"
     echo "0. 退出"
     echo
 
-    read -r -p "请选择 [0-7]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
       2) menu_deploy_vless_reality ;;
@@ -67,7 +69,8 @@ main_menu() {
       4) menu_export_client ;;
       5) menu_outbound_management ;;
       6) menu_firewall_management ;;
-      7) show_service_status; pause_enter ;;
+      7) menu_backup_management ;;
+      8) show_service_status; pause_enter ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
