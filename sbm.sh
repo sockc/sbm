@@ -21,6 +21,7 @@ source "${BASE_DIR}/lib/user.sh"
 source "${BASE_DIR}/lib/outbound.sh"
 source "${BASE_DIR}/lib/firewall.sh"
 source "${BASE_DIR}/lib/backup.sh"
+source "${BASE_DIR}/lib/self_update.sh"
 
 show_header() {
   clear
@@ -57,11 +58,12 @@ main_menu() {
     echo "5. 出站管理"
     echo "6. 防火墙管理"
     echo "7. 备份与恢复"
-    echo "8. 服务状态"
+    echo "8. 脚本自更新"
+    echo "9. 服务状态"
     echo "0. 退出"
     echo
 
-    read -r -p "请选择 [0-8]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
       2) menu_deploy_vless_reality ;;
@@ -70,7 +72,8 @@ main_menu() {
       5) menu_outbound_management ;;
       6) menu_firewall_management ;;
       7) menu_backup_management ;;
-      8) show_service_status; pause_enter ;;
+      8) menu_self_update ;;
+      9) show_service_status; pause_enter ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
