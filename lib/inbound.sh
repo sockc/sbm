@@ -5,14 +5,19 @@ gen_uuid() {
     cat /proc/sys/kernel/random/uuid
     return 0
   fi
+
   if has_cmd uuidgen; then
     uuidgen
     return 0
   fi
-  python3 - <<'PY'
-import uuid
-print(uuid.uuid4())
-PY
+
+  if has_cmd python3; then
+    python3 -c 'import uuid; print(uuid.uuid4())'
+    return 0
+  fi
+
+  err "无法生成 UUID：缺少 /proc、uuidgen 或 python3"
+  return 1
 }
 
 gen_short_id() {
@@ -20,18 +25,24 @@ gen_short_id() {
     openssl rand -hex 4
     return 0
   fi
-  od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
+
+  od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
 }
 
 gen_reality_keypair() {
   local out private_key public_key
 
-  out="$(sing-box generate reality-keypair 2>/dev/null || true)"
-  private_key="$(printf '%s\n' "$out" | awk -F': *' '/[Pp]rivate/ {print $2; exit}')"
-  public_key="$(printf '%s\n' "$out" | awk -F': *' '/[Pp]ublic/ {print $2; exit}')"
+  out="$(sing-box generate reality-keypair 2>/dev/null)" || {
+    err "执行 sing-box generate reality-keypair 失败"
+    return 1
+  }
+
+  private_key="$(printf '%s\n' "$out" | awk -F': *' 'tolower($1) ~ /private/ {print $2; exit}')"
+  public_key="$(printf '%s\n' "$out" | awk -F': *' 'tolower($1) ~ /public/  {print $2; exit}')"
 
   if [ -z "$private_key" ] || [ -z "$public_key" ]; then
-    err "生成 Reality 密钥失败"
+    err "解析 Reality 密钥失败"
+    printf '%s\n' "$out"
     return 1
   fi
 
@@ -54,8 +65,63 @@ detect_connect_host() {
   hostname -I 2>/dev/null | awk '{print $1}'
 }
 
+is_valid_ip() {
+  local addr="$1"
+
+  [ "$addr" = "::" ] && return 0
+  [ "$addr" = "0.0.0.0" ] && return 0
+
+  if has_cmd python3; then
+    python3 - "$addr" <<'PY'
+import sys, ipaddress
+try:
+    ipaddress.ip_address(sys.argv[1])
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(1)
+PY
+    return $?
+  fi
+
+  case "$addr" in
+    *[!0-9a-fA-F:.]*|'') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+prompt_listen_addr() {
+  local addr
+  while true; do
+    addr="$(prompt_default "请输入监听地址" "0.0.0.0")"
+    if is_valid_ip "$addr"; then
+      printf '%s\n' "$addr"
+      return 0
+    fi
+    echo "输入无效：监听地址必须是 IP，例如 0.0.0.0 或 ::"
+  done
+}
+
+prompt_listen_port() {
+  local port
+  while true; do
+    port="$(prompt_default "请输入监听端口" "443")"
+    case "$port" in
+      ''|*[!0-9]*)
+        echo "输入无效：端口必须是 1-65535 的数字"
+        ;;
+      *)
+        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+          printf '%s\n' "$port"
+          return 0
+        fi
+        echo "输入无效：端口必须是 1-65535"
+        ;;
+    esac
+  done
+}
+
 restart_singbox_service() {
-  systemctl daemon-reload || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl enable sing-box >/dev/null 2>&1 || true
   systemctl restart sing-box
 }
@@ -74,13 +140,13 @@ deploy_vless_reality() {
   local listen_addr listen_port user_name user_uuid
   local server_name handshake_server handshake_port
   local short_id keys private_key public_key
-  local connect_host tcp_fast_open config_tmp tfo_json
+  local connect_host tcp_fast_open config_tmp
   local default_host
 
   default_host="$(detect_connect_host)"
   [ -z "$default_host" ] && default_host="YOUR_SERVER_IP"
 
-  listen_addr="$(prompt_listen_addr="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_listen_port)"
   user_name="$(prompt_default "请输入用户备注" "user1")"
   user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
@@ -100,6 +166,7 @@ deploy_vless_reality() {
     pause_enter
     return 1
   }
+
   private_key="${keys%%|*}"
   public_key="${keys##*|}"
 
@@ -125,7 +192,7 @@ deploy_vless_reality() {
 
   config_tmp="${TMP_DIR}/config.json"
 
-  cat > "${config_tmp}" <<EOF
+  cat > "${config_tmp}" <<JSON
 {
   "log": {
     "level": "warn",
@@ -176,7 +243,7 @@ deploy_vless_reality() {
     "final": "direct"
   }
 }
-EOF
+JSON
 
   if ! check_config_file "${config_tmp}"; then
     err "配置校验失败，未覆盖正式配置"
@@ -214,49 +281,4 @@ EOF
 menu_deploy_vless_reality() {
   deploy_vless_reality
 }
-is_valid_ip() {
-  local addr="$1"
-
-  [ "$addr" = "::" ] && return 0
-  [ "$addr" = "0.0.0.0" ] && return 0
-
-  python3 - "$addr" <<'PY'
-import sys, ipaddress
-try:
-    ipaddress.ip_address(sys.argv[1])
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-PY
-}
-
-prompt_listen_addr() {
-  local addr
-  while true; do
-    addr="$(prompt_default "请输入监听地址" "0.0.0.0")"
-    if is_valid_ip "$addr"; then
-      printf '%s\n' "$addr"
-      return 0
-    fi
-    echo "输入无效：监听地址必须是 IPv4/IPv6 地址，例如 0.0.0.0 或 ::"
-  done
-}
-
-prompt_listen_port() {
-  local port
-  while true; do
-    port="$(prompt_default "请输入监听端口" "443")"
-    case "$port" in
-      ''|*[!0-9]*)
-        echo "输入无效：端口必须是 1-65535 的数字"
-        ;;
-      *)
-        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-          printf '%s\n' "$port"
-          return 0
-        fi
-        echo "输入无效：端口必须是 1-65535"
-        ;;
-    esac
-  done
-}
+SCRIPT
