@@ -14,6 +14,10 @@ source "${BASE_DIR}/lib/install_core.sh"
 source "${BASE_DIR}/lib/validate.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/inbound.sh"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/lib/export.sh"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/lib/user.sh"
 
 show_header() {
   clear
@@ -32,34 +36,38 @@ show_header() {
   echo "======================================"
 }
 
-main_menu() {
-  while true; do
-    show_header
-    echo "1. 安装/升级 sing-box 内核"
-    echo "2. 部署 VLESS + Reality"
-    echo "3. 出站管理（占位）"
-    echo "4. 服务状态"
-    echo "0. 退出"
-    echo
-
-    read -r -p "请选择 [0-4]: " choice
-    case "${choice:-}" in
-      1) menu_install_core ;;
-      2) menu_deploy_vless_reality ;;
-      3) echo "暂未实现"; pause_enter ;;
-      4) show_service_status; pause_enter ;;
-      0) exit 0 ;;
-      *) echo "无效选项"; sleep 1 ;;
-    esac
-  done
-}
-
 show_service_status() {
   if systemctl list-unit-files 2>/dev/null | grep -q '^sing-box\.service'; then
     systemctl --no-pager --full status sing-box || true
   else
     echo "系统中未发现 sing-box.service"
   fi
+}
+
+main_menu() {
+  while true; do
+    show_header
+    echo "1. 安装/升级 sing-box 内核"
+    echo "2. 部署 VLESS + Reality"
+    echo "3. 用户管理"
+    echo "4. 导出客户端 URI"
+    echo "5. 出站管理（占位）"
+    echo "6. 服务状态"
+    echo "0. 退出"
+    echo
+
+    read -r -p "请选择 [0-6]: " choice
+    case "${choice:-}" in
+      1) menu_install_core ;;
+      2) menu_deploy_vless_reality ;;
+      3) menu_user_management ;;
+      4) menu_export_client ;;
+      5) echo "暂未实现"; pause_enter ;;
+      6) show_service_status; pause_enter ;;
+      0) exit 0 ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
 }
 
 main_menu
