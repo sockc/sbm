@@ -10,6 +10,10 @@ source "${BASE_DIR}/lib/common.sh"
 source "${BASE_DIR}/lib/input.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/install_core.sh"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/lib/validate.sh"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/lib/inbound.sh"
 
 show_header() {
   clear
@@ -32,7 +36,7 @@ main_menu() {
   while true; do
     show_header
     echo "1. 安装/升级 sing-box 内核"
-    echo "2. 部署 VLESS + Reality（占位）"
+    echo "2. 部署 VLESS + Reality"
     echo "3. 出站管理（占位）"
     echo "4. 服务状态"
     echo "0. 退出"
@@ -41,7 +45,7 @@ main_menu() {
     read -r -p "请选择 [0-4]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
-      2) echo "暂未实现"; pause_enter ;;
+      2) menu_deploy_vless_reality ;;
       3) echo "暂未实现"; pause_enter ;;
       4) show_service_status; pause_enter ;;
       0) exit 0 ;;
