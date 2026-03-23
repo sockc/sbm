@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${REPO:-yourname/singbox-manager}"
+REPO="${REPO:-sockc/sbm}"
 BRANCH="${BRANCH:-main}"
 
 INSTALL_DIR="/usr/local/share/sbm"
@@ -34,13 +34,24 @@ install_file() {
 main() {
   echo "==> 安装 sbm 脚本..."
 
-  mkdir -p "$INSTALL_DIR/lib" "$INSTALL_DIR/templates/inbounds" "$INSTALL_DIR/templates/outbounds"
+  mkdir -p \
+    "$INSTALL_DIR/lib" \
+    "$INSTALL_DIR/templates/inbounds" \
+    "$INSTALL_DIR/templates/outbounds"
 
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/sbm.sh" "$INSTALL_DIR/sbm.sh"
+
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/env.sh" "$INSTALL_DIR/lib/env.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/common.sh" "$INSTALL_DIR/lib/common.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/input.sh" "$INSTALL_DIR/lib/input.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/install_core.sh" "$INSTALL_DIR/lib/install_core.sh"
+  install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/validate.sh" "$INSTALL_DIR/lib/validate.sh"
+  install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/inbound.sh" "$INSTALL_DIR/lib/inbound.sh"
+
+  # 先预留，后面做出站管理时不会再漏
+  if fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/outbound.sh" >/dev/null 2>&1; then
+    install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/outbound.sh" "$INSTALL_DIR/lib/outbound.sh"
+  fi
 
   cat > "$BIN_PATH" <<'EOF'
 #!/usr/bin/env bash
