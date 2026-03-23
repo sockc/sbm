@@ -65,6 +65,12 @@ exec /usr/local/share/sbm/sbm.sh "$@"
 EOF
   chmod +x "$BIN_PATH"
 
+  cat > "${INSTALL_DIR}/install.env" <<EOF
+SBM_REPO="${REPO}"
+SBM_BRANCH="${BRANCH}"
+EOF
+chmod 600 "${INSTALL_DIR}/install.env" 2>/dev/null || true
+
   echo
   echo "安装完成"
   echo "命令入口: $BIN_PATH"
