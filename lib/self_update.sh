@@ -35,7 +35,7 @@ get_remote_sbm_version() {
   get_install_source
 
   local url
-  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${SBM_BRANCH_LOCAL}/main/lib/env.sh"
+  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${SBM_BRANCH_LOCAL}/lib/env.sh"
 
   fetch_text "$url" 2>/dev/null | awk -F'"' '
     /^SBM_VERSION=/ {
@@ -67,7 +67,7 @@ run_self_update() {
   get_install_source
 
   local tmp_installer url
-  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${SBM_BRANCH_LOCAL}/main/install.sh"
+  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${SBM_BRANCH_LOCAL}/install.sh"
   tmp_installer="${TMP_DIR}/sbm-install.sh"
 
   echo "准备从以下来源更新脚本："
