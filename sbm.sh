@@ -19,6 +19,7 @@ source "${BASE_DIR}/lib/export.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/user.sh"
 source "${BASE_DIR}/lib/outbound.sh"
+source "${BASE_DIR}/lib/firewall.sh"
 
 show_header() {
   clear
@@ -53,18 +54,20 @@ main_menu() {
     echo "3. 用户管理"
     echo "4. 导出客户端 URI"
     echo "5. 出站管理"
-    echo "6. 服务状态"
+    echo "6. 防火墙管理"
+    echo "7. 服务状态"
     echo "0. 退出"
     echo
 
-    read -r -p "请选择 [0-6]: " choice
+    read -r -p "请选择 [0-7]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
       2) menu_deploy_vless_reality ;;
       3) menu_user_management ;;
       4) menu_export_client ;;
       5) menu_outbound_management ;;
-      6) show_service_status; pause_enter ;;
+      6) menu_firewall_management ;;
+      7) show_service_status; pause_enter ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
