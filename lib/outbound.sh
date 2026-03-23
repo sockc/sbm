@@ -2,6 +2,7 @@
 
 require_outbound_manage_env() {
   require_python3 || return 1
+  require_config_file || return 1
   mkdir -p "${TMP_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}"
 }
 
@@ -204,23 +205,22 @@ update_source_from_meta_path() {
 show_outbound_sources() {
   require_outbound_manage_env || return 1
 
-  local found=0
+  local idx=1 found=0
   echo "编号 ID           名称             类型   节点数  最后更新"
   echo "--------------------------------------------------------------------------"
 
   while IFS= read -r meta_path; do
     [ -z "${meta_path}" ] && continue
     found=1
-
     mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
     printf '%-4s %-12s %-16s %-6s %-7s %s\n' \
-      "$found" \
+      "$idx" \
       "${_src_meta[0]:-}" \
       "${_src_meta[1]:-}" \
       "${_src_meta[2]:-}" \
       "${_src_meta[5]:-0}" \
       "${_src_meta[6]:-<未更新>}"
-    found=$((found + 1))
+    idx=$((idx + 1))
   done < <(list_source_meta_files)
 
   if [ "$found" -eq 0 ]; then
@@ -231,7 +231,7 @@ show_outbound_sources() {
   echo
   echo "详细位置："
 
-  local idx=1
+  idx=1
   while IFS= read -r meta_path; do
     [ -z "${meta_path}" ] && continue
     mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
@@ -398,6 +398,270 @@ PY
   pause_enter
 }
 
+apply_cache_files_to_runtime() {
+  require_outbound_manage_env || return 1
+  need_root
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.apply-nodes.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "$@" <<'PY'
+import copy, json, re, sys
+
+config_path = sys.argv[1]
+cache_files = sys.argv[2:]
+
+cfg = json.load(open(config_path, 'r', encoding='utf-8'))
+outbounds = cfg.setdefault("outbounds", [])
+
+REMOTE_TYPES = {
+    "socks",
+    "http",
+    "shadowsocks",
+    "vmess",
+    "trojan",
+    "wireguard",
+    "hysteria",
+    "vless",
+    "shadowtls",
+    "tuic",
+    "hysteria2",
+    "anytls",
+    "tor",
+    "ssh",
+    "naive",
+}
+
+def is_generated_node(ob):
+    tag = ob.get("tag", "")
+    return re.fullmatch(r"node-\d+", tag or "") is not None
+
+def is_generated_group(ob):
+    tag = ob.get("tag", "")
+    typ = ob.get("type", "")
+    return (tag == "auto" and typ == "urltest") or (tag == "proxy" and typ == "selector")
+
+preserved = []
+existing_remote_tags = []
+
+has_direct = False
+for ob in outbounds:
+    tag = ob.get("tag", "")
+    typ = ob.get("type", "")
+
+    if tag == "direct":
+        has_direct = True
+
+    if is_generated_node(ob) or is_generated_group(ob):
+        continue
+
+    preserved.append(ob)
+
+    if typ in REMOTE_TYPES and tag:
+        existing_remote_tags.append(tag)
+
+if not has_direct:
+    preserved.insert(0, {"type": "direct", "tag": "direct"})
+
+imported = []
+counter = 1
+for cache_path in cache_files:
+    items = json.load(open(cache_path, 'r', encoding='utf-8'))
+    if not isinstance(items, list):
+        continue
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        typ = item.get("type", "")
+        if typ not in REMOTE_TYPES:
+            continue
+        new_item = copy.deepcopy(item)
+        new_item["tag"] = f"node-{counter:03d}"
+        imported.append(new_item)
+        counter += 1
+
+node_tags = [ob["tag"] for ob in imported]
+all_candidate_tags = []
+for tag in existing_remote_tags + node_tags:
+    if tag not in all_candidate_tags:
+        all_candidate_tags.append(tag)
+
+new_outbounds = preserved + imported
+
+if all_candidate_tags:
+    new_outbounds.append({
+        "type": "urltest",
+        "tag": "auto",
+        "outbounds": all_candidate_tags,
+        "interrupt_exist_connections": False
+    })
+
+    selector_members = ["direct", "auto"] + all_candidate_tags
+    selector_default = "auto"
+else:
+    selector_members = ["direct"]
+    selector_default = "direct"
+
+new_outbounds.append({
+    "type": "selector",
+    "tag": "proxy",
+    "outbounds": selector_members,
+    "default": selector_default,
+    "interrupt_exist_connections": False
+})
+
+cfg["outbounds"] = new_outbounds
+cfg.setdefault("route", {})["final"] = "proxy"
+
+with open(config_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+print(len(imported))
+print(len(all_candidate_tags))
+PY
+  then
+    err "应用节点到策略组失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败"
+    pause_enter
+    return 1
+  fi
+
+  ok "节点已应用到当前策略组"
+  pause_enter
+}
+
+apply_one_source_to_runtime() {
+  require_outbound_manage_env || return 1
+
+  show_outbound_sources
+  echo
+
+  local idx meta_path source_id cache_file
+  idx="$(prompt_required "请输入要应用的节点源编号")"
+  meta_path="$(get_source_meta_path_by_index "${idx}")"
+
+  if [ -z "${meta_path}" ] || [ ! -f "${meta_path}" ]; then
+    err "节点源编号无效"
+    pause_enter
+    return 1
+  fi
+
+  mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+  source_id="${_src_meta[0]:-}"
+  cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+
+  if [ ! -f "${cache_file}" ]; then
+    err "尚未找到缓存节点，请先更新该节点源"
+    pause_enter
+    return 1
+  fi
+
+  echo "准备将节点源 [${_src_meta[1]:-}] 应用到当前策略组"
+  if ! confirm_default_yes "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_cache_files_to_runtime "${cache_file}"
+}
+
+apply_all_sources_to_runtime() {
+  require_outbound_manage_env || return 1
+
+  local cache_files=()
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
+    mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+    local source_id="${_src_meta[0]:-}"
+    local cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+    [ -f "${cache_file}" ] && cache_files+=("${cache_file}")
+  done < <(list_source_meta_files)
+
+  if [ "${#cache_files[@]}" -eq 0 ]; then
+    err "未找到可应用的节点缓存，请先更新节点源"
+    pause_enter
+    return 1
+  fi
+
+  echo "准备将全部节点源应用到当前策略组"
+  if ! confirm_default_yes "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_cache_files_to_runtime "${cache_files[@]}"
+}
+
+show_current_applied_nodes() {
+  require_outbound_manage_env || return 1
+
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, re, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+outbounds = cfg.get("outbounds", [])
+
+print("当前已应用节点：")
+print("编号 标签         类型         服务器")
+print("----------------------------------------------------------------")
+
+idx = 1
+for ob in outbounds:
+    tag = ob.get("tag", "")
+    typ = ob.get("type", "")
+    if not re.fullmatch(r"node-\d+", tag or ""):
+        continue
+    server = ob.get("server", "") or ob.get("server_name", "") or ob.get("address", "") or ob.get("endpoint", "")
+    port = ob.get("server_port", "") or ob.get("port", "")
+    endpoint = f"{server}:{port}" if server and port else (server or "<未知>")
+    print(f"{idx:<4} {tag:<12} {typ:<12} {endpoint}")
+    idx += 1
+
+if idx == 1:
+    print("<暂无已应用节点>")
+
+print("----------------------------------------------------------------")
+
+selector = None
+urltest = None
+for ob in outbounds:
+    if ob.get("tag") == "proxy" and ob.get("type") == "selector":
+        selector = ob
+    if ob.get("tag") == "auto" and ob.get("type") == "urltest":
+        urltest = ob
+
+route_final = cfg.get("route", {}).get("final", "")
+print(f"route.final : {route_final or '<空>'}")
+if selector:
+    print(f"selector    : {', '.join(selector.get('outbounds', []))}")
+    print(f"default     : {selector.get('default', '')}")
+else:
+    print("selector    : <未找到>")
+if urltest:
+    print(f"urltest     : {', '.join(urltest.get('outbounds', []))}")
+else:
+    print("urltest     : <未找到>")
+PY
+
+  pause_enter
+}
+
 delete_source() {
   require_outbound_manage_env || return 1
 
@@ -442,11 +706,14 @@ menu_outbound_management() {
     echo "4. 更新指定节点源"
     echo "5. 更新全部节点源"
     echo "6. 预览导入节点"
-    echo "7. 删除节点源"
+    echo "7. 应用指定节点源到当前策略组"
+    echo "8. 应用全部节点源到当前策略组"
+    echo "9. 查看当前已应用节点"
+    echo "10. 删除节点源"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-7]: " choice
+    read -r -p "请选择 [0-10]: " choice
     case "${choice:-}" in
       1) add_subscription_url_source ;;
       2) import_local_singbox_file_source ;;
@@ -454,7 +721,10 @@ menu_outbound_management() {
       4) update_one_source ;;
       5) update_all_sources ;;
       6) preview_source_nodes ;;
-      7) delete_source ;;
+      7) apply_one_source_to_runtime ;;
+      8) apply_all_sources_to_runtime ;;
+      9) show_current_applied_nodes ;;
+      10) delete_source ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
