@@ -281,4 +281,3 @@ JSON
 menu_deploy_vless_reality() {
   deploy_vless_reality
 }
-SCRIPT
