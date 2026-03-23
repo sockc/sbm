@@ -80,8 +80,8 @@ deploy_vless_reality() {
   default_host="$(detect_connect_host)"
   [ -z "$default_host" ] && default_host="YOUR_SERVER_IP"
 
-  listen_addr="$(prompt_default "请输入监听地址" "::")"
-  listen_port="$(prompt_default "请输入监听端口" "443")"
+  listen_addr="$(prompt_listen_addr="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_listen_port)"
   user_name="$(prompt_default "请输入用户备注" "user1")"
   user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
   server_name="$(prompt_default "请输入伪装域名 server_name" "www.cloudflare.com")"
@@ -213,4 +213,50 @@ EOF
 
 menu_deploy_vless_reality() {
   deploy_vless_reality
+}
+is_valid_ip() {
+  local addr="$1"
+
+  [ "$addr" = "::" ] && return 0
+  [ "$addr" = "0.0.0.0" ] && return 0
+
+  python3 - "$addr" <<'PY'
+import sys, ipaddress
+try:
+    ipaddress.ip_address(sys.argv[1])
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+prompt_listen_addr() {
+  local addr
+  while true; do
+    addr="$(prompt_default "请输入监听地址" "0.0.0.0")"
+    if is_valid_ip "$addr"; then
+      printf '%s\n' "$addr"
+      return 0
+    fi
+    echo "输入无效：监听地址必须是 IPv4/IPv6 地址，例如 0.0.0.0 或 ::"
+  done
+}
+
+prompt_listen_port() {
+  local port
+  while true; do
+    port="$(prompt_default "请输入监听端口" "443")"
+    case "$port" in
+      ''|*[!0-9]*)
+        echo "输入无效：端口必须是 1-65535 的数字"
+        ;;
+      *)
+        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+          printf '%s\n' "$port"
+          return 0
+        fi
+        echo "输入无效：端口必须是 1-65535"
+        ;;
+    esac
+  done
 }
