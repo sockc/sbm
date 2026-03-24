@@ -464,6 +464,36 @@ for ob in outbounds:
 if not has_direct:
     preserved.insert(0, {"type": "direct", "tag": "direct"})
 
+RESERVED_TAGS = {"direct", "block", "proxy", "auto", "dns-out"}
+
+def make_unique_tag(preferred, used_tags, fallback_index):
+    tag = (preferred or "").strip()
+
+    if not tag:
+        tag = f"node-{fallback_index:03d}"
+
+    if tag in RESERVED_TAGS:
+        tag = f"{tag}-node"
+
+    if tag not in used_tags:
+        used_tags.add(tag)
+        return tag
+
+    base = tag
+    n = 2
+    while True:
+        candidate = f"{base}-{n}"
+        if candidate not in used_tags and candidate not in RESERVED_TAGS:
+            used_tags.add(candidate)
+            return candidate
+        n += 1
+
+used_tags = set()
+for ob in preserved:
+    tag = ob.get("tag", "")
+    if tag:
+        used_tags.add(tag)
+
 imported = []
 counter = 1
 for cache_path in cache_files:
@@ -476,8 +506,11 @@ for cache_path in cache_files:
         typ = item.get("type", "")
         if typ not in REMOTE_TYPES:
             continue
+
         new_item = copy.deepcopy(item)
-        new_item["tag"] = f"node-{counter:03d}"
+        original_tag = str(new_item.get("tag", "")).strip()
+        new_item["tag"] = make_unique_tag(original_tag, used_tags, counter)
+
         imported.append(new_item)
         counter += 1
 
