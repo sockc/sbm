@@ -1,16 +1,112 @@
 {
   "groups": {
-    "proxy": {
-      "type": "selector",
-      "members": ["direct", "auto", "ALL_NODES"],
-      "default": "auto"
-    },
-    "cn-proxy": {
+    "cn-group": {
       "type": "selector",
       "members": ["direct", "MATCH:🇨🇳", "MATCH:中国", "MATCH:cudy"],
       "default": "direct"
+    },
+    "hk-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇭🇰", "MATCH:香港"],
+      "default": "direct"
+    },
+    "tw-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇹🇼", "MATCH:台湾"],
+      "default": "direct"
+    },
+    "jp-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇯🇵", "MATCH:日本"],
+      "default": "direct"
+    },
+    "sg-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"],
+      "default": "direct"
+    },
+    "us-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇺🇸", "MATCH:美国"],
+      "default": "direct"
+    },
+    "uk-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇬🇧", "MATCH:英国"],
+      "default": "direct"
+    },
+    "de-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇩🇪", "MATCH:德国"],
+      "default": "direct"
+    },
+    "nl-group": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇳🇱", "MATCH:荷兰"],
+      "default": "direct"
+    },
+
+    "proxy": {
+      "type": "selector",
+      "members": [
+        "direct",
+        "auto",
+        "cn-group",
+        "hk-group",
+        "tw-group",
+        "jp-group",
+        "sg-group",
+        "us-group",
+        "uk-group",
+        "de-group",
+        "nl-group",
+        "ALL_NODES"
+      ],
+      "default": "auto"
+    },
+
+    "google-group": {
+      "type": "selector",
+      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
+    },
+    "youtube-group": {
+      "type": "selector",
+      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
+    },
+    "ai-group": {
+      "type": "selector",
+      "members": ["us-group", "sg-group", "jp-group", "hk-group", "tw-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "us-group"
+    },
+    "spotify-group": {
+      "type": "selector",
+      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
+    },
+    "telegram-group": {
+      "type": "selector",
+      "members": ["sg-group", "hk-group", "tw-group", "jp-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "sg-group"
+    },
+    "finance-group": {
+      "type": "selector",
+      "members": ["hk-group", "sg-group", "uk-group", "us-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
+    },
+    "streaming-group": {
+      "type": "selector",
+      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
+    },
+    "social-group": {
+      "type": "selector",
+      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
+      "default": "hk-group"
     }
   },
+
   "rules": {
     "direct_domain_suffix": [
       "lan",
@@ -19,21 +115,116 @@
       "localhost",
       "ts.net"
     ],
-    "cn_proxy_domain_suffix": [
-      "qq.com",
-      "bilibili.com",
-      "taobao.com",
-      "jd.com",
-      "mi.com"
-    ],
-    "proxy_domain_suffix": [
-      "openai.com",
-      "chatgpt.com",
-      "anthropic.com",
-      "claude.ai",
-      "youtube.com",
-      "googlevideo.com"
-    ],
+
+    "route_groups": {
+      "youtube-group": [
+        "youtube.com",
+        "youtu.be",
+        "ytimg.com",
+        "googlevideo.com",
+        "youtube-nocookie.com"
+      ],
+
+      "google-group": [
+        "google.com",
+        "googleapis.com",
+        "gstatic.com",
+        "gvt1.com",
+        "ggpht.com",
+        "gmail.com",
+        "googletagmanager.com",
+        "googlesyndication.com",
+        "recaptcha.net"
+      ],
+
+      "ai-group": [
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "anthropic.com",
+        "claude.ai",
+        "perplexity.ai",
+        "cursor.sh",
+        "grok.com",
+        "x.ai"
+      ],
+
+      "spotify-group": [
+        "spotify.com",
+        "scdn.co",
+        "spotifycdn.com"
+      ],
+
+      "telegram-group": [
+        "telegram.org",
+        "t.me",
+        "telegram.me",
+        "telegra.ph",
+        "tdesktop.com"
+      ],
+
+      "finance-group": [
+        "wise.com",
+        "revolut.com",
+        "stripe.com",
+        "paypal.com",
+        "payoneer.com",
+        "visa.com",
+        "mastercard.com"
+      ],
+
+      "streaming-group": [
+        "netflix.com",
+        "nflxvideo.net",
+        "nflximg.net",
+        "nflximg.com",
+        "disneyplus.com",
+        "disney-plus.net",
+        "dssott.com",
+        "hulu.com",
+        "hulustream.com",
+        "max.com"
+      ],
+
+      "social-group": [
+        "x.com",
+        "twitter.com",
+        "twimg.com",
+        "facebook.com",
+        "fbcdn.net",
+        "instagram.com",
+        "cdninstagram.com",
+        "threads.net",
+        "whatsapp.com",
+        "whatsapp.net",
+        "tiktok.com",
+        "tiktokv.com",
+        "tiktokcdn.com",
+        "reddit.com",
+        "redditmedia.com"
+      ],
+
+      "cn-group": [
+        "qq.com",
+        "bilibili.com",
+        "taobao.com",
+        "jd.com",
+        "mi.com",
+        "alicdn.com",
+        "alipay.com",
+        "douyin.com",
+        "douyinpic.com",
+        "xiaohongshu.com",
+        "weixin.qq.com",
+        "qpic.cn",
+        "gtimg.com",
+        "iqiyi.com",
+        "youku.com",
+        "mgtv.com"
+      ]
+    },
+
     "final": "proxy"
   }
 }
