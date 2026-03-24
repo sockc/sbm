@@ -681,18 +681,21 @@ deploy_hysteria2() {
   fi
 
   mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
 
+  local hy2_tag
   local listen_addr listen_port user_name password
   local cert_path key_path connect_host server_name
   local up_mbps down_mbps obfs_password use_obfs
-  local cert_mode default_host tmp_file backend
+  local cert_mode default_host tmp_file backend cert_pair
 
   default_host="$(detect_connect_host)"
   [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
 
+  hy2_tag="$(prompt_default "请输入 Hysteria2 实例标签" "$(next_inbound_tag_by_prefix "hy2")")"
   listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_port_default "请输入 Hysteria2 监听端口" "8443")"
-  user_name="$(prompt_default "请输入 Hysteria2 用户备注" "hy2-user1")"
+  user_name="$(prompt_default "请输入 Hysteria2 用户备注" "${hy2_tag}")"
   password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
   server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
@@ -705,10 +708,9 @@ deploy_hysteria2() {
   cert_mode="${cert_mode:-1}"
 
   if [ "${cert_mode}" = "2" ]; then
-    local cert_pair
     cert_pair="$(gen_self_signed_cert "${server_name}")" || {
-     pause_enter
-     return 1
+      pause_enter
+      return 1
     }
     cert_path="${cert_pair%%|*}"
     key_path="${cert_pair##*|}"
@@ -748,6 +750,7 @@ deploy_hysteria2() {
 
   echo
   echo "========== Hysteria2 配置预览 =========="
+  echo "实例标签       : ${hy2_tag}"
   echo "监听地址       : ${listen_addr}"
   echo "监听端口       : ${listen_port}/udp"
   echo "用户备注       : ${user_name}"
@@ -755,9 +758,9 @@ deploy_hysteria2() {
   echo "客户端连接地址 : ${connect_host}"
   echo "客户端 SNI     : ${server_name}"
   if [ "${cert_mode}" = "2" ]; then
-  echo "证书模式       : 自签证书"
+    echo "证书模式       : 自签证书"
   else
-  echo "证书模式       : 正式证书"
+    echo "证书模式       : 正式证书"
   fi
   echo "证书路径       : ${cert_path}"
   echo "私钥路径       : ${key_path}"
@@ -780,23 +783,23 @@ deploy_hysteria2() {
   cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
   if ! python3 - "${tmp_file}" \
-    "${listen_addr}" "${listen_port}" "${user_name}" "${password}" \
+    "${hy2_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${password}" \
     "${cert_path}" "${key_path}" "${up_mbps}" "${down_mbps}" \
     "${use_obfs}" "${obfs_password}" <<'PY'
 import json, sys
 
 (
-    path, listen_addr, listen_port, user_name, password,
+    path_cfg, hy2_tag, listen_addr, listen_port, user_name, password,
     cert_path, key_path, up_mbps, down_mbps,
     use_obfs, obfs_password
 ) = sys.argv[1:]
 
-cfg = json.load(open(path, 'r', encoding='utf-8'))
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
 inbounds = cfg.setdefault("inbounds", [])
 
 hy2_obj = {
     "type": "hysteria2",
-    "tag": "hy2-in",
+    "tag": hy2_tag,
     "listen": listen_addr,
     "listen_port": int(listen_port),
     "up_mbps": int(up_mbps),
@@ -822,7 +825,7 @@ if use_obfs == "true":
 
 replaced = False
 for i, ib in enumerate(inbounds):
-    if ib.get("tag") == "hy2-in":
+    if ib.get("tag") == hy2_tag:
         inbounds[i] = hy2_obj
         replaced = True
         break
@@ -830,7 +833,7 @@ for i, ib in enumerate(inbounds):
 if not replaced:
     inbounds.append(hy2_obj)
 
-with open(path, 'w', encoding='utf-8') as f:
+with open(path_cfg, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 PY
   then
@@ -853,11 +856,12 @@ PY
     return 1
   fi
 
-  save_hy2_meta "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
-  
+  save_hy2_meta "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
+
   ok "Hysteria2 部署完成"
   echo
   echo "------ Hysteria2 客户端关键参数 ------"
+  echo "实例标签    : ${hy2_tag}"
   echo "地址        : ${connect_host}"
   echo "端口        : ${listen_port}"
   echo "用户名备注  : ${user_name}"
@@ -872,15 +876,16 @@ PY
   fi
   echo "--------------------------------------"
   echo
+
   if [ "${cert_mode}" = "2" ]; then
-  echo "证书模式    : 自签证书"
-  echo "客户端建议  :"
-  echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
-  echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
-  echo "自签证书路径: ${cert_path}"
+    echo "证书模式    : 自签证书"
+    echo "客户端建议  :"
+    echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
+    echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
+    echo "自签证书路径: ${cert_path}"
   else
-  echo "证书模式    : 正式证书"
-  echo "客户端建议  : 正常校验证书即可"
+    echo "证书模式    : 正式证书"
+    echo "客户端建议  : 正常校验证书即可"
   fi
   echo
   echo "注意：如果你用官方 Hysteria2 客户端，常见的 userpass 实际要填成 <用户名>:<密码> 的组合。"
