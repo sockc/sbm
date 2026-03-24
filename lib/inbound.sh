@@ -476,6 +476,11 @@ deploy_hysteria2() {
   echo "密码           : ${password}"
   echo "客户端连接地址 : ${connect_host}"
   echo "客户端 SNI     : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+  echo "证书模式       : 自签证书"
+  else
+  echo "证书模式       : 正式证书"
+  fi
   echo "证书路径       : ${cert_path}"
   echo "私钥路径       : ${key_path}"
   echo "up_mbps        : ${up_mbps}"
