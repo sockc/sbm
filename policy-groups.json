@@ -1,0 +1,39 @@
+{
+  "groups": {
+    "proxy": {
+      "type": "selector",
+      "members": ["direct", "auto", "ALL_NODES"],
+      "default": "auto"
+    },
+    "cn-proxy": {
+      "type": "selector",
+      "members": ["direct", "MATCH:🇨🇳", "MATCH:中国", "MATCH:cudy"],
+      "default": "direct"
+    }
+  },
+  "rules": {
+    "direct_domain_suffix": [
+      "lan",
+      "local",
+      "home.arpa",
+      "localhost",
+      "ts.net"
+    ],
+    "cn_proxy_domain_suffix": [
+      "qq.com",
+      "bilibili.com",
+      "taobao.com",
+      "jd.com",
+      "mi.com"
+    ],
+    "proxy_domain_suffix": [
+      "openai.com",
+      "chatgpt.com",
+      "anthropic.com",
+      "claude.ai",
+      "youtube.com",
+      "googlevideo.com"
+    ],
+    "final": "proxy"
+  }
+}
