@@ -577,8 +577,8 @@ PY
     return 1
   fi
 
-  save_hy2_meta "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}"
-
+  save_hy2_meta "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
+  
   ok "Hysteria2 部署完成"
   echo
   echo "------ Hysteria2 客户端关键参数 ------"
