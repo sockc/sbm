@@ -43,11 +43,33 @@ show_header() {
 }
 
 show_service_status() {
-  if systemctl list-unit-files 2>/dev/null | grep -q '^sing-box\.service'; then
-    systemctl --no-pager --full status sing-box || true
-  else
-    echo "系统中未发现 sing-box.service"
+  local unit="sing-box.service"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "当前系统未检测到 systemd"
+    return 1
   fi
+
+  if ! systemctl cat "${unit}" >/dev/null 2>&1; then
+    echo "系统中未发现 ${unit}"
+    return 1
+  fi
+
+  local active enabled mainpid
+  active="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "${unit}" 2>/dev/null || true)"
+  mainpid="$(systemctl show -p MainPID --value "${unit}" 2>/dev/null || true)"
+
+  echo "======================================"
+  echo "            服务状态"
+  echo "======================================"
+  echo "服务名称 : ${unit}"
+  echo "运行状态 : ${active:-unknown}"
+  echo "开机启动 : ${enabled:-unknown}"
+  echo "主进程PID: ${mainpid:-0}"
+  echo "--------------------------------------"
+
+  systemctl --no-pager --full status "${unit}" || true
 }
 
 main_menu() {
