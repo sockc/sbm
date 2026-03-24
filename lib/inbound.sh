@@ -701,6 +701,355 @@ menu_deploy_hysteria2() {
   deploy_hysteria2
 }
 
+gen_uuid_value() {
+  if has_cmd sing-box; then
+    sing-box generate uuid 2>/dev/null && return 0
+  fi
+
+  if has_cmd uuidgen; then
+    uuidgen | tr 'A-Z' 'a-z'
+    return 0
+  fi
+
+  python3 - <<'PY'
+import uuid
+print(str(uuid.uuid4()))
+PY
+}
+
+gen_random_path() {
+  if has_cmd openssl; then
+    echo "/$(openssl rand -hex 4)"
+    return 0
+  fi
+
+  python3 - <<'PY'
+import secrets
+print("/" + secrets.token_hex(4))
+PY
+}
+
+save_vmess_meta() {
+  local connect_host="$1"
+  local listen_port="$2"
+  local user_name="$3"
+  local uuid="$4"
+  local transport_type="$5"
+  local tls_enabled="$6"
+  local server_name="$7"
+  local path="$8"
+  local host="$9"
+  local cert_mode="${10}"
+
+  cat > "${BASE_DIR}/vmess-meta.json" <<JSON
+{
+  "connect_host": "${connect_host}",
+  "listen_port": ${listen_port},
+  "user_name": "${user_name}",
+  "uuid": "${uuid}",
+  "transport_type": "${transport_type}",
+  "tls_enabled": "${tls_enabled}",
+  "server_name": "${server_name}",
+  "path": "${path}",
+  "host": "${host}",
+  "cert_mode": "${cert_mode}"
+}
+JSON
+
+  chmod 600 "${BASE_DIR}/vmess-meta.json" 2>/dev/null || true
+}
+
+deploy_vmess() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+
+  local transport_choice transport_type tls_choice tls_enabled cert_mode
+  local listen_addr listen_port user_name uuid
+  local connect_host server_name cert_path key_path
+  local path host method default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  echo
+  echo "请选择 VMess 传输方式："
+  echo "1. HTTP"
+  echo "2. WebSocket"
+  read -r -p "请选择 [1-2]（默认 2）: " transport_choice
+  transport_choice="${transport_choice:-2}"
+
+  case "${transport_choice}" in
+    1) transport_type="http" ;;
+    2) transport_type="ws" ;;
+    *) err "无效选项"; pause_enter; return 1 ;;
+  esac
+
+  echo
+  echo "是否启用 TLS："
+  echo "1. 开启"
+  echo "2. 关闭"
+  read -r -p "请选择 [1-2]（默认 2）: " tls_choice
+  tls_choice="${tls_choice:-2}"
+
+  case "${tls_choice}" in
+    1) tls_enabled="true" ;;
+    2) tls_enabled="false" ;;
+    *) err "无效选项"; pause_enter; return 1 ;;
+  esac
+
+  listen_addr="$(prompt_listen_addr)"
+  if [ "${tls_enabled}" = "true" ]; then
+    listen_port="$(prompt_port_default "请输入 VMess 监听端口" "443")"
+  else
+    if [ "${transport_type}" = "http" ]; then
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "8080")"
+    else
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "80")"
+    fi
+  fi
+
+  user_name="$(prompt_default "请输入 VMess 用户备注" "vmess-user1")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+
+  if [ "${transport_type}" = "http" ]; then
+    path="$(prompt_default "请输入 HTTP path" "/")"
+    host="$(prompt_default "请输入 HTTP host（留空为不设置）" "")"
+    method="$(prompt_default "请输入 HTTP method" "GET")"
+  else
+    path="$(prompt_default "请输入 WebSocket path" "$(gen_random_path)")"
+    host="$(prompt_default "请输入 WS Host 头（留空为不设置）" "")"
+    method=""
+  fi
+
+  server_name=""
+  cert_path=""
+  key_path=""
+  cert_mode="0"
+
+  if [ "${tls_enabled}" = "true" ]; then
+    server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+    echo
+    echo "证书模式："
+    echo "1. 正式证书"
+    echo "2. 自签证书"
+    read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+    cert_mode="${cert_mode:-1}"
+
+    if [ "${cert_mode}" = "2" ]; then
+      cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+        pause_enter
+        return 1
+      }
+      cert_path="${cert_pair%%|*}"
+      key_path="${cert_pair##*|}"
+
+      echo
+      echo "已自动生成自签证书："
+      echo "certificate_path : ${cert_path}"
+      echo "key_path         : ${key_path}"
+      echo
+    else
+      cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+      key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+    fi
+
+    if [ ! -f "${cert_path}" ]; then
+      err "证书文件不存在：${cert_path}"
+      pause_enter
+      return 1
+    fi
+
+    if [ ! -f "${key_path}" ]; then
+      err "私钥文件不存在：${key_path}"
+      pause_enter
+      return 1
+    fi
+  fi
+
+  echo
+  echo "========== VMess 配置预览 =========="
+  echo "传输方式       : ${transport_type}"
+  echo "TLS            : ${tls_enabled}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "alterId        : 0"
+  echo "path           : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host      : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method         : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "server_name    : ${server_name}"
+    if [ "${cert_mode}" = "2" ]; then
+      echo "证书模式       : 自签证书"
+    else
+      echo "证书模式       : 正式证书"
+    fi
+    echo "证书路径       : ${cert_path}"
+    echo "私钥路径       : ${key_path}"
+  fi
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.vmess.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
+    "${transport_type}" "${path}" "${host}" "${method}" \
+    "${tls_enabled}" "${server_name}" "${cert_path}" "${key_path}" <<'PY'
+import json, sys
+
+(
+    path_cfg, listen_addr, listen_port, user_name, uuid,
+    transport_type, req_path, host, method,
+    tls_enabled, server_name, cert_path, key_path
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+vmess_obj = {
+    "type": "vmess",
+    "tag": "vmess-in",
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "alterId": 0
+        }
+    ]
+}
+
+if transport_type == "http":
+    transport = {
+        "type": "http",
+        "path": req_path,
+        "method": method or "GET"
+    }
+    if host:
+        transport["host"] = [host]
+elif transport_type == "ws":
+    transport = {
+        "type": "ws",
+        "path": req_path
+    }
+    if host:
+        transport["headers"] = {"Host": host}
+else:
+    raise SystemExit("unknown transport type")
+
+vmess_obj["transport"] = transport
+
+if tls_enabled == "true":
+    vmess_obj["tls"] = {
+        "enabled": True,
+        "server_name": server_name,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == "vmess-in":
+        inbounds[i] = vmess_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(vmess_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VMess 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vmess_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${cert_mode}"
+
+  ok "VMess 部署完成"
+  echo
+  echo "------ VMess 客户端关键参数 ------"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "alterId     : 0"
+  echo "传输        : ${transport_type}"
+  echo "path        : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host   : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method      : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "TLS         : enabled"
+    echo "SNI         : ${server_name}"
+  else
+    echo "TLS         : disabled"
+  fi
+  echo "----------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_vmess() {
+  deploy_vmess
+}
+
 menu_inbound_management() {
   while true; do
     clear
@@ -709,15 +1058,17 @@ menu_inbound_management() {
     echo "======================================"
     echo "1. 部署/重装 VLESS + Reality"
     echo "2. 部署/重装 Hysteria2"
-    echo "3. 查看当前入站"
+    echo "3. 部署/重装 VMess"
+    echo "4. 查看当前入站"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-3]: " choice
+    read -r -p "请选择 [0-4]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless_reality ;;
       2) menu_deploy_hysteria2 ;;
-      3) show_current_inbounds ;;
+      3) menu_deploy_vmess ;;
+      4) show_current_inbounds ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
