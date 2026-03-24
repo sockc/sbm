@@ -353,7 +353,6 @@ REMOTE_TYPES = {
 }
 RESERVED = {"direct", "block", "dns-out"}
 
-# 保留已有远程节点和基础固定出站，删掉旧的策略组
 preserved = []
 remote_tags = []
 
@@ -365,7 +364,7 @@ for ob in outbounds:
     if tag == "direct":
         has_direct = True
 
-    if typ in ("selector", "urltest") or tag in ("proxy", "auto", "cn-proxy"):
+    if typ in ("selector", "urltest"):
         continue
 
     preserved.append(ob)
@@ -396,9 +395,9 @@ def resolve_members(members, all_nodes):
             if item not in result:
                 result.append(item)
     return result
-    
-# 先建 auto
+
 generated = []
+
 if remote_tags:
     generated.append({
         "type": "urltest",
@@ -425,9 +424,11 @@ for group_name, group_cfg in groups.items():
         "outbounds": members,
         "interrupt_exist_connections": False
     }
+
     default = group_cfg.get("default", "")
     if gtype == "selector":
         obj["default"] = default if default in members else members[0]
+
     generated.append(obj)
 
 cfg["outbounds"] = preserved + generated
