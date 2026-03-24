@@ -285,6 +285,12 @@ if selector:
 else:
     print("selector 状态   : 未找到 tag=proxy 的 selector")
 
+if cn_selector:
+    print(f"cn-proxy 默认  : {cn_selector.get('default', '<空>')}")
+    print(f"cn-proxy 成员  : {', '.join(cn_selector.get('outbounds', [])) or '<空>'}")
+else:
+    print("cn-proxy 状态  : 未找到")
+
 print(f"规则数量        : {len(rules)}")
 print("规则摘要        :")
 
