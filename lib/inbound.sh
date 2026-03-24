@@ -594,6 +594,16 @@ PY
   fi
   echo "--------------------------------------"
   echo
+  if [ "${cert_mode}" = "2" ]; then
+  echo "证书模式    : 自签证书"
+  echo "客户端建议  :"
+  echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
+  echo "  2. 更省事：在客户端 tls.insecure = true"
+  else
+  echo "证书模式    : 正式证书"
+  echo "客户端建议  : 正常校验证书即可"
+  fi
+  echo
   echo "注意：如果你用官方 Hysteria2 客户端，常见的 userpass 实际要填成 <用户名>:<密码> 的组合。"
   echo
 
