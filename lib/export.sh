@@ -2,14 +2,7 @@
 
 require_config_file() {
   if [ ! -f "${CONFIG_DIR}/config.json" ]; then
-    err "未找到 ${CONFIG_DIR}/config.json，请先部署 VLESS + Reality"
-    return 1
-  fi
-}
-
-require_meta_file() {
-  if [ ! -f "${META_FILE}" ]; then
-    err "未找到 ${META_FILE}，请先重新执行一次 VLESS + Reality 部署"
+    err "未找到 ${CONFIG_DIR}/config.json，请先部署入站实例"
     return 1
   fi
 }
@@ -21,30 +14,111 @@ require_python3() {
   fi
 }
 
-list_vless_user_rows() {
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+list_protocol_meta_files() {
+  local protocol="$1"
+
+  python3 - "${INBOUND_META_DIR}" "${protocol}" <<'PY'
+import json, pathlib, sys
+
+base = pathlib.Path(sys.argv[1])
+protocol = sys.argv[2]
+
+if not base.exists():
+    raise SystemExit(0)
+
+rows = []
+for p in base.glob("*.json"):
+    try:
+        meta = json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    if meta.get("protocol") == protocol:
+        rows.append((p.stat().st_mtime, str(p)))
+
+for _, path in sorted(rows, reverse=True):
+    print(path)
+PY
+}
+
+get_protocol_meta_by_index() {
+  local protocol="$1"
+  local idx="$2"
+  list_protocol_meta_files "${protocol}" | sed -n "${idx}p"
+}
+
+show_protocol_meta_list() {
+  local protocol="$1"
+  local idx=1 found=0
+
+  echo "编号 标签                     协议            端口"
+  echo "--------------------------------------------------------"
+
+  while IFS= read -r f; do
+    [ -z "${f}" ] && continue
+    found=1
+    python3 - "$f" "$idx" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = sys.argv[2]
+print(f"{idx:<4} {meta.get('tag',''):<24} {meta.get('protocol',''):<14} {meta.get('listen_port','')}")
+PY
+    idx=$((idx + 1))
+  done < <(list_protocol_meta_files "${protocol}")
+
+  if [ "$found" -eq 0 ]; then
+    echo "<暂无实例>"
+  fi
+  echo "--------------------------------------------------------"
+}
+
+select_protocol_meta_file() {
+  local protocol="$1"
+  local label="$2"
+  local idx meta_file
+
+  show_protocol_meta_list "${protocol}"
+  echo
+  idx="$(prompt_required "请输入要导出的 ${label} 编号")"
+  meta_file="$(get_protocol_meta_by_index "${protocol}" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    return 1
+  fi
+
+  printf '%s\n' "${meta_file}"
+}
+
+list_vless_user_rows_by_tag() {
+  local reality_tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${reality_tag}" <<'PY'
 import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+target_tag = sys.argv[2]
 
 for ib in cfg.get("inbounds", []):
-    if ib.get("type") == "vless" and ib.get("tag") == "vless-reality-in":
+    if ib.get("type") == "vless" and ib.get("tag") == target_tag:
         for i, u in enumerate(ib.get("users", []), 1):
             print(f"{i}\t{u.get('name', '')}\t{u.get('uuid', '')}")
         break
 PY
 }
 
-get_vless_user_by_index() {
-  local idx="$1"
-  python3 - "${CONFIG_DIR}/config.json" "$idx" <<'PY'
+get_vless_user_by_index_and_tag() {
+  local reality_tag="$1"
+  local idx="$2"
+
+  python3 - "${CONFIG_DIR}/config.json" "${reality_tag}" "${idx}" <<'PY'
 import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-idx = int(sys.argv[2])
+target_tag = sys.argv[2]
+idx = int(sys.argv[3])
 
 for ib in cfg.get("inbounds", []):
-    if ib.get("type") == "vless" and ib.get("tag") == "vless-reality-in":
+    if ib.get("type") == "vless" and ib.get("tag") == target_tag:
         users = ib.get("users", [])
         if idx < 1 or idx > len(users):
             print("索引越界", file=sys.stderr)
@@ -53,16 +127,32 @@ for ib in cfg.get("inbounds", []):
         print(f"{u.get('name', '')}|{u.get('uuid', '')}")
         raise SystemExit(0)
 
-print("未找到 vless-reality-in 入站", file=sys.stderr)
+print("未找到指定 Reality 入站", file=sys.stderr)
 raise SystemExit(1)
 PY
 }
 
-build_vless_uri() {
-  local user_name="$1"
-  local user_uuid="$2"
+show_vless_users_simple_by_tag() {
+  local reality_tag="$1"
+  local found=0
 
-  python3 - "${META_FILE}" "$user_name" "$user_uuid" <<'PY'
+  while IFS=$'\t' read -r idx name uuid; do
+    [ -z "${idx}" ] && continue
+    found=1
+    printf '%-4s %-18s %s\n' "$idx" "$name" "$uuid"
+  done < <(list_vless_user_rows_by_tag "${reality_tag}")
+
+  if [ "$found" -eq 0 ]; then
+    echo "暂无用户"
+  fi
+}
+
+build_reality_uri_from_meta() {
+  local meta_file="$1"
+  local user_name="$2"
+  local user_uuid="$3"
+
+  python3 - "${meta_file}" "${user_name}" "${user_uuid}" <<'PY'
 import json, sys, urllib.parse
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -78,12 +168,12 @@ if ":" in host and not host.startswith("["):
 params = {
     "encryption": "none",
     "flow": meta.get("flow", "xtls-rprx-vision"),
-    "security": meta.get("security", "reality"),
+    "security": "reality",
     "sni": meta["server_name"],
     "fp": meta.get("fingerprint", "chrome"),
     "pbk": meta["public_key"],
     "sid": meta["short_id"],
-    "type": meta.get("type", "tcp"),
+    "type": "tcp",
 }
 
 query = urllib.parse.urlencode(params)
@@ -92,32 +182,32 @@ print(f"vless://{uuid}@{host}:{port}?{query}#{fragment}")
 PY
 }
 
-show_vless_users_simple() {
-  local found=0
-  while IFS=$'\t' read -r idx name uuid; do
-    [ -z "${idx}" ] && continue
-    found=1
-    printf '%-4s %-16s %s\n' "$idx" "$name" "$uuid"
-  done < <(list_vless_user_rows)
-
-  if [ "$found" -eq 0 ]; then
-    echo "暂无用户"
-  fi
-}
-
 export_single_user_uri() {
   require_config_file || return 1
-  require_meta_file || return 1
   require_python3 || return 1
 
+  local meta_file reality_tag idx user_line user_name user_uuid uri
+
+  meta_file="$(select_protocol_meta_file "vless-reality" "Reality")" || {
+    pause_enter
+    return 1
+  }
+
+  reality_tag="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(meta.get("tag", ""))
+PY
+)"
+
+  echo
+  echo "当前 Reality 实例：${reality_tag}"
   echo "当前用户列表："
-  show_vless_users_simple
+  show_vless_users_simple_by_tag "${reality_tag}"
   echo
 
-  local idx user_line user_name user_uuid uri
   idx="$(prompt_default "请输入要导出的用户编号" "1")"
-
-  user_line="$(get_vless_user_by_index "$idx")" || {
+  user_line="$(get_vless_user_by_index_and_tag "${reality_tag}" "${idx}")" || {
     err "读取用户失败"
     pause_enter
     return 1
@@ -125,13 +215,16 @@ export_single_user_uri() {
 
   user_name="${user_line%%|*}"
   user_uuid="${user_line##*|}"
-
-  uri="$(build_vless_uri "$user_name" "$user_uuid")"
+  uri="$(build_reality_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}")" || {
+    err "生成 Reality URI 失败"
+    pause_enter
+    return 1
+  }
 
   echo
-  echo "------ ${user_name} 的 VLESS Reality 链接 ------"
-  echo "$uri"
-  echo "----------------------------------------------"
+  echo "------ ${user_name} 的 Reality 链接 ------"
+  echo "${uri}"
+  echo "-----------------------------------------"
   echo
 
   pause_enter
@@ -139,17 +232,29 @@ export_single_user_uri() {
 
 export_all_user_uris() {
   require_config_file || return 1
-  require_meta_file || return 1
   require_python3 || return 1
 
-  local found=0
+  local meta_file reality_tag found=0
+
+  meta_file="$(select_protocol_meta_file "vless-reality" "Reality")" || {
+    pause_enter
+    return 1
+  }
+
+  reality_tag="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(meta.get("tag", ""))
+PY
+)"
+
   while IFS=$'\t' read -r idx name uuid; do
     [ -z "${idx}" ] && continue
     found=1
     echo "[$idx] ${name}"
-    build_vless_uri "$name" "$uuid"
+    build_reality_uri_from_meta "${meta_file}" "${name}" "${uuid}"
     echo
-  done < <(list_vless_user_rows)
+  done < <(list_vless_user_rows_by_tag "${reality_tag}")
 
   if [ "$found" -eq 0 ]; then
     echo "暂无用户"
@@ -158,18 +263,10 @@ export_all_user_uris() {
   pause_enter
 }
 
-require_hy2_meta_file() {
-  local hy2_meta="${BASE_DIR}/hy2-meta.json"
-  if [ ! -f "${hy2_meta}" ]; then
-    err "未找到 ${hy2_meta}，请先部署 Hysteria2"
-    return 1
-  fi
-}
-
 build_hy2_uri() {
-  local hy2_meta="${BASE_DIR}/hy2-meta.json"
+  local meta_file="$1"
 
-  python3 - "${hy2_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import json, sys, urllib.parse
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -180,6 +277,7 @@ password = str(meta["password"])
 sni = str(meta["server_name"])
 obfs_password = str(meta.get("obfs_password", "") or "")
 cert_mode = str(meta.get("cert_mode", "1"))
+tag = str(meta.get("user_name", meta.get("tag", "hy2")))
 
 if ":" in host and not host.startswith("["):
     host = f"[{host}]"
@@ -191,19 +289,18 @@ if obfs_password:
     params["obfs"] = "salamander"
     params["obfs-password"] = obfs_password
 
-# 自签证书为了方便导入，默认给 URI 加 insecure=1
 if cert_mode == "2":
     params["insecure"] = "1"
 
 query = urllib.parse.urlencode(params)
-print(f"hysteria2://{auth}@{host}:{port}/?{query}")
+print(f"hysteria2://{auth}@{host}:{port}/?{query}#{urllib.parse.quote(tag)}")
 PY
 }
 
 build_hy2_singbox_json() {
-  local hy2_meta="${BASE_DIR}/hy2-meta.json"
+  local meta_file="$1"
 
-  python3 - "${hy2_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import json, sys
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -245,10 +342,14 @@ PY
 }
 
 export_hy2_uri() {
-  require_hy2_meta_file || { pause_enter; return 1; }
+  local meta_file uri
 
-  local uri
-  uri="$(build_hy2_uri)" || {
+  meta_file="$(select_protocol_meta_file "hysteria2" "Hysteria2")" || {
+    pause_enter
+    return 1
+  }
+
+  uri="$(build_hy2_uri "${meta_file}")" || {
     err "生成 Hysteria2 URI 失败"
     pause_enter
     return 1
@@ -259,18 +360,20 @@ export_hy2_uri() {
   echo "${uri}"
   echo "---------------------------"
   echo
-  echo "说明：如果你用的是自签证书，这里已默认附带 insecure=1，便于直接导入。"
-  echo
-
   pause_enter
 }
 
 export_hy2_singbox_json() {
-  require_hy2_meta_file || { pause_enter; return 1; }
+  local meta_file
+
+  meta_file="$(select_protocol_meta_file "hysteria2" "Hysteria2")" || {
+    pause_enter
+    return 1
+  }
 
   echo
   echo "------ Hysteria2 sing-box 客户端 JSON ------"
-  build_hy2_singbox_json || {
+  build_hy2_singbox_json "${meta_file}" || {
     err "生成 Hysteria2 客户端 JSON 失败"
     pause_enter
     return 1
@@ -282,42 +385,10 @@ export_hy2_singbox_json() {
   pause_enter
 }
 
-list_protocol_meta_files() {
-  local protocol="$1"
-
-  python3 - "${INBOUND_META_DIR}" "${protocol}" <<'PY'
-import json, pathlib, sys
-
-base = pathlib.Path(sys.argv[1])
-protocol = sys.argv[2]
-
-if not base.exists():
-    raise SystemExit(0)
-
-rows = []
-for p in base.glob("*.json"):
-    try:
-        meta = json.loads(p.read_text(encoding='utf-8'))
-    except Exception:
-        continue
-    if meta.get("protocol") == protocol:
-        rows.append((p.stat().st_mtime, str(p)))
-
-for _, path in sorted(rows, reverse=True):
-    print(path)
-PY
-}
-
-get_protocol_meta_by_index() {
-  local protocol="$1"
-  local idx="$2"
-  list_protocol_meta_files "${protocol}" | sed -n "${idx}p"
-}
-
 show_vmess_meta_list() {
   local idx=1 found=0
-  echo "编号 标签               传输      端口"
-  echo "---------------------------------------------"
+  echo "编号 标签                     传输      端口"
+  echo "--------------------------------------------------------"
 
   while IFS= read -r f; do
     [ -z "${f}" ] && continue
@@ -326,7 +397,7 @@ show_vmess_meta_list() {
 import json, sys
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 idx = sys.argv[2]
-print(f"{idx:<4} {meta.get('tag',''):<18} {meta.get('transport_type',''):<8} {meta.get('listen_port','')}")
+print(f"{idx:<4} {meta.get('tag',''):<24} {meta.get('transport_type',''):<8} {meta.get('listen_port','')}")
 PY
     idx=$((idx + 1))
   done < <(list_protocol_meta_files "vmess")
@@ -334,21 +405,13 @@ PY
   if [ "$found" -eq 0 ]; then
     echo "<暂无 VMess 实例>"
   fi
-  echo "---------------------------------------------"
-}
-
-require_vmess_meta_file() {
-  local vmess_meta="${BASE_DIR}/vmess-meta.json"
-  if [ ! -f "${vmess_meta}" ]; then
-    err "未找到 ${vmess_meta}，请先部署 VMess"
-    return 1
-  fi
+  echo "--------------------------------------------------------"
 }
 
 build_vmess_uri() {
-  local vmess_meta="$1"
+  local meta_file="$1"
 
-  python3 - "${vmess_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import base64, json, sys
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -381,9 +444,9 @@ PY
 }
 
 build_vmess_singbox_json() {
-  local vmess_meta="$1"
+  local meta_file="$1"
 
-  python3 - "${vmess_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import json, sys
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -462,9 +525,6 @@ export_vmess_uri() {
   echo "${uri}"
   echo "-----------------------"
   echo
-  echo "说明：这是常见兼容格式的 vmess:// 链接；不同客户端兼容性不完全一致。"
-  echo
-
   pause_enter
 }
 
@@ -496,18 +556,10 @@ export_vmess_singbox_json() {
   pause_enter
 }
 
-require_tuic_meta_file() {
-  local tuic_meta="${BASE_DIR}/tuic-meta.json"
-  if [ ! -f "${tuic_meta}" ]; then
-    err "未找到 ${tuic_meta}，请先部署 TUIC"
-    return 1
-  fi
-}
-
 build_tuic_uri() {
-  local tuic_meta="${BASE_DIR}/tuic-meta.json"
+  local meta_file="$1"
 
-  python3 - "${tuic_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import json, sys
 from urllib.parse import quote, urlencode
 
@@ -520,6 +572,7 @@ password = str(meta["password"])
 sni = str(meta["server_name"])
 congestion_control = str(meta.get("congestion_control", "cubic") or "cubic")
 cert_mode = str(meta.get("cert_mode", "1"))
+tag = str(meta.get("user_name", meta.get("tag", "tuic")))
 
 if ":" in host and not host.startswith("["):
     host = f"[{host}]"
@@ -534,16 +587,16 @@ if cert_mode == "2":
     params["allow_insecure"] = "1"
 
 userinfo = f"{quote(uuid, safe='')}:{quote(password, safe='')}"
-name = quote(str(meta.get("user_name", "tuic")), safe='')
+name = quote(tag, safe='')
 query = urlencode(params)
 print(f"tuic://{userinfo}@{host}:{port}?{query}#{name}")
 PY
 }
 
 build_tuic_singbox_json() {
-  local tuic_meta="${BASE_DIR}/tuic-meta.json"
+  local meta_file="$1"
 
-  python3 - "${tuic_meta}" <<'PY'
+  python3 - "${meta_file}" <<'PY'
 import json, sys
 
 meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -576,10 +629,14 @@ PY
 }
 
 export_tuic_uri() {
-  require_tuic_meta_file || { pause_enter; return 1; }
+  local meta_file idx uri
 
-  local uri
-  uri="$(build_tuic_uri)" || {
+  meta_file="$(select_protocol_meta_file "tuic" "TUIC")" || {
+    pause_enter
+    return 1
+  }
+
+  uri="$(build_tuic_uri "${meta_file}")" || {
     err "生成 TUIC URI 失败"
     pause_enter
     return 1
@@ -590,18 +647,20 @@ export_tuic_uri() {
   echo "${uri}"
   echo "----------------------"
   echo
-  echo "说明：TUIC 分享链接在不同客户端之间兼容性不完全一致；下方的 sing-box JSON 更稳。"
-  echo
-
   pause_enter
 }
 
 export_tuic_singbox_json() {
-  require_tuic_meta_file || { pause_enter; return 1; }
+  local meta_file
+
+  meta_file="$(select_protocol_meta_file "tuic" "TUIC")" || {
+    pause_enter
+    return 1
+  }
 
   echo
   echo "------ TUIC sing-box 客户端 JSON ------"
-  build_tuic_singbox_json || {
+  build_tuic_singbox_json "${meta_file}" || {
     err "生成 TUIC 客户端 JSON 失败"
     pause_enter
     return 1
@@ -619,8 +678,8 @@ menu_export_client() {
     echo "======================================"
     echo "            导出客户端配置"
     echo "======================================"
-    echo "1. 导出单个用户 VLESS URI"
-    echo "2. 导出全部用户 VLESS URI"
+    echo "1. 导出单个用户 Reality URI"
+    echo "2. 导出指定 Reality 实例全部用户 URI"
     echo "3. 导出 Hysteria2 URI"
     echo "4. 导出 Hysteria2 sing-box JSON"
     echo "5. 导出 VMess URI"
