@@ -62,7 +62,7 @@
 
     "中国节点": {
       "type": "selector",
-      "members": ["MATCH:🇨🇳", "MATCH:中国",],
+      "members": ["MATCH:🇨🇳", "MATCH:中国"],
     },
     "香港节点": {
       "type": "selector",
