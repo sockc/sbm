@@ -1276,19 +1276,26 @@ menu_deploy_vmess() {
 }
 
 save_tuic_meta() {
-  local connect_host="$1"
-  local listen_port="$2"
-  local user_name="$3"
-  local uuid="$4"
-  local password="$5"
-  local server_name="$6"
-  local congestion_control="$7"
-  local zero_rtt_handshake="$8"
-  local heartbeat="$9"
-  local cert_mode="${10}"
+  local tuic_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local password="$6"
+  local server_name="$7"
+  local congestion_control="$8"
+  local zero_rtt_handshake="$9"
+  local heartbeat="${10}"
+  local cert_mode="${11}"
 
-  cat > "${BASE_DIR}/tuic-meta.json" <<JSON
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tuic_tag}")"
+
+  cat > "${meta_file}" <<JSON
 {
+  "protocol": "tuic",
+  "tag": "${tuic_tag}",
   "connect_host": "${connect_host}",
   "listen_port": ${listen_port},
   "user_name": "${user_name}",
@@ -1302,7 +1309,7 @@ save_tuic_meta() {
 }
 JSON
 
-  chmod 600 "${BASE_DIR}/tuic-meta.json" 2>/dev/null || true
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 deploy_tuic() {
@@ -1315,7 +1322,9 @@ deploy_tuic() {
   fi
 
   mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
 
+  local tuic_tag
   local listen_addr listen_port user_name uuid password
   local connect_host server_name cert_path key_path cert_mode
   local congestion_control zero_rtt_choice zero_rtt_handshake
@@ -1324,9 +1333,10 @@ deploy_tuic() {
   default_host="$(detect_connect_host)"
   [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
 
+  tuic_tag="$(prompt_default "请输入 TUIC 实例标签" "$(next_inbound_tag_by_prefix "tuic")")"
   listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_port_default "请输入 TUIC 监听端口" "443")"
-  user_name="$(prompt_default "请输入 TUIC 用户备注" "tuic-user1")"
+  user_name="$(prompt_default "请输入 TUIC 用户备注" "${tuic_tag}")"
   uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
   password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
@@ -1397,6 +1407,7 @@ deploy_tuic() {
 
   echo
   echo "========== TUIC 配置预览 =========="
+  echo "实例标签       : ${tuic_tag}"
   echo "监听地址       : ${listen_addr}"
   echo "监听端口       : ${listen_port}/udp"
   echo "用户备注       : ${user_name}"
@@ -1427,12 +1438,12 @@ deploy_tuic() {
   cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
   if ! python3 - "${tmp_file}" \
-    "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
+    "${tuic_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
     "${cert_path}" "${key_path}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" <<'PY'
 import json, sys
 
 (
-    path_cfg, listen_addr, listen_port, user_name, uuid, password,
+    path_cfg, tuic_tag, listen_addr, listen_port, user_name, uuid, password,
     cert_path, key_path, congestion_control, zero_rtt_handshake, heartbeat
 ) = sys.argv[1:]
 
@@ -1441,7 +1452,7 @@ inbounds = cfg.setdefault("inbounds", [])
 
 tuic_obj = {
     "type": "tuic",
-    "tag": "tuic-in",
+    "tag": tuic_tag,
     "listen": listen_addr,
     "listen_port": int(listen_port),
     "users": [
@@ -1463,7 +1474,7 @@ tuic_obj = {
 
 replaced = False
 for i, ib in enumerate(inbounds):
-    if ib.get("tag") == "tuic-in":
+    if ib.get("tag") == tuic_tag:
         inbounds[i] = tuic_obj
         replaced = True
         break
@@ -1494,11 +1505,12 @@ PY
     return 1
   fi
 
-  save_tuic_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
+  save_tuic_meta "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
 
   ok "TUIC 部署完成"
   echo
   echo "------ TUIC 客户端关键参数 ------"
+  echo "实例标签    : ${tuic_tag}"
   echo "地址        : ${connect_host}"
   echo "端口        : ${listen_port}"
   echo "UUID        : ${uuid}"
