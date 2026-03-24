@@ -264,13 +264,25 @@ show_clash_api_status() {
   echo "CORS 允许来源     : ${CLASH_API_ALLOW_ORIGIN:-*}"
   echo "允许私网访问      : ${CLASH_API_ALLOW_PRIVATE:-false}"
 
-  if [ -n "${CLASH_API_CONTROLLER}" ]; then
-    local port
-    port="$(controller_port "${CLASH_API_CONTROLLER}")"
-    if [ -n "${port}" ]; then
-      echo "UI 地址           : http://127.0.0.1:${port}/ui/"
-    fi
+if [ -n "${CLASH_API_CONTROLLER}" ]; then
+  local ctrl_host port
+  ctrl_host="${CLASH_API_CONTROLLER%:*}"
+  port="$(controller_port "${CLASH_API_CONTROLLER}")"
+
+  if [ -n "${port}" ]; then
+    case "${ctrl_host}" in
+      127.0.0.1|localhost|::1|\[::1\])
+        echo "UI 地址           : http://127.0.0.1:${port}/ui/"
+        ;;
+      0.0.0.0|::|\[::\])
+        echo "UI 地址           : http://服务器IP:${port}/ui/"
+        ;;
+      *)
+        echo "UI 地址           : http://${ctrl_host}:${port}/ui/"
+        ;;
+    esac
   fi
+fi
 
   echo "======================================"
   pause_enter
@@ -599,7 +611,7 @@ restore_clash_api_defaults() {
     "${controller}" \
     "dashboard" \
     "" \
-    "" \
+    "direct" \
     "${secret}" \
     "Rule" \
     "" \
