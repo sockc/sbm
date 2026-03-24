@@ -1,109 +1,109 @@
 {
   "groups": {
-    "cn-group": {
+    "中国节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇨🇳", "MATCH:中国", "MATCH:cudy"],
       "default": "direct"
     },
-    "hk-group": {
+    "香港节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇭🇰", "MATCH:香港"],
       "default": "direct"
     },
-    "tw-group": {
+    "台湾节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇹🇼", "MATCH:台湾"],
       "default": "direct"
     },
-    "jp-group": {
+    "日本节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇯🇵", "MATCH:日本"],
       "default": "direct"
     },
-    "sg-group": {
+    "新加坡节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"],
       "default": "direct"
     },
-    "us-group": {
+    "美国节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇺🇸", "MATCH:美国"],
       "default": "direct"
     },
-    "uk-group": {
+    "英国节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇬🇧", "MATCH:英国"],
       "default": "direct"
     },
-    "de-group": {
+    "德国节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇩🇪", "MATCH:德国"],
       "default": "direct"
     },
-    "nl-group": {
+    "荷兰节点": {
       "type": "selector",
       "members": ["direct", "MATCH:🇳🇱", "MATCH:荷兰"],
       "default": "direct"
     },
 
-    "proxy": {
+    "手动切换": {
       "type": "selector",
       "members": [
         "direct",
-        "auto",
-        "cn-group",
-        "hk-group",
-        "tw-group",
-        "jp-group",
-        "sg-group",
-        "us-group",
-        "uk-group",
-        "de-group",
-        "nl-group",
+        "自动选择",
+        "中国节点",
+        "香港节点",
+        "台湾节点",
+        "日本节点",
+        "新加坡节点",
+        "美国节点",
+        "英国节点",
+        "德国节点",
+        "荷兰节点",
         "ALL_NODES"
       ],
-      "default": "auto"
+      "default": "自动选择"
     },
 
-    "google-group": {
+    "谷歌服务": {
       "type": "selector",
-      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     },
-    "youtube-group": {
+    "YouTube": {
       "type": "selector",
-      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     },
-    "ai-group": {
+    "人工智能": {
       "type": "selector",
-      "members": ["us-group", "sg-group", "jp-group", "hk-group", "tw-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "us-group"
+      "members": ["美国节点", "新加坡节点", "日本节点", "香港节点", "台湾节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "美国节点"
     },
-    "spotify-group": {
+    "Spotify": {
       "type": "selector",
-      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     },
-    "telegram-group": {
+    "Telegram": {
       "type": "selector",
-      "members": ["sg-group", "hk-group", "tw-group", "jp-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "sg-group"
+      "members": ["新加坡节点", "香港节点", "台湾节点", "日本节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "新加坡节点"
     },
-    "finance-group": {
+    "跨境金融": {
       "type": "selector",
-      "members": ["hk-group", "sg-group", "uk-group", "us-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "新加坡节点", "英国节点", "美国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     },
-    "streaming-group": {
+    "流媒体": {
       "type": "selector",
-      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     },
-    "social-group": {
+    "社交平台": {
       "type": "selector",
-      "members": ["hk-group", "tw-group", "jp-group", "sg-group", "us-group", "uk-group", "de-group", "nl-group", "proxy"],
-      "default": "hk-group"
+      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "default": "香港节点"
     }
   },
 
@@ -117,7 +117,7 @@
     ],
 
     "route_groups": {
-      "youtube-group": [
+      "YouTube": [
         "youtube.com",
         "youtu.be",
         "ytimg.com",
@@ -125,7 +125,7 @@
         "youtube-nocookie.com"
       ],
 
-      "google-group": [
+      "谷歌服务": [
         "google.com",
         "googleapis.com",
         "gstatic.com",
@@ -137,7 +137,7 @@
         "recaptcha.net"
       ],
 
-      "ai-group": [
+      "人工智能": [
         "openai.com",
         "chatgpt.com",
         "oaistatic.com",
@@ -150,13 +150,13 @@
         "x.ai"
       ],
 
-      "spotify-group": [
+      "Spotify": [
         "spotify.com",
         "scdn.co",
         "spotifycdn.com"
       ],
 
-      "telegram-group": [
+      "Telegram": [
         "telegram.org",
         "t.me",
         "telegram.me",
@@ -164,7 +164,7 @@
         "tdesktop.com"
       ],
 
-      "finance-group": [
+      "跨境金融": [
         "wise.com",
         "revolut.com",
         "stripe.com",
@@ -174,7 +174,7 @@
         "mastercard.com"
       ],
 
-      "streaming-group": [
+      "流媒体": [
         "netflix.com",
         "nflxvideo.net",
         "nflximg.net",
@@ -187,7 +187,7 @@
         "max.com"
       ],
 
-      "social-group": [
+      "社交平台": [
         "x.com",
         "twitter.com",
         "twimg.com",
@@ -205,7 +205,7 @@
         "redditmedia.com"
       ],
 
-      "cn-group": [
+      "中国节点": [
         "qq.com",
         "bilibili.com",
         "taobao.com",
@@ -225,6 +225,6 @@
       ]
     },
 
-    "final": "proxy"
+    "final": "手动切换"
   }
 }
