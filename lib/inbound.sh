@@ -499,8 +499,24 @@ deploy_hysteria2() {
   read -r -p "请选择 [1-2]（默认 1）: " cert_mode
   cert_mode="${cert_mode:-1}"
 
-  cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
-  key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  if [ "${cert_mode}" = "2" ]; then
+    local cert_pair
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+     pause_enter
+     return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
 
   up_mbps="$(prompt_default "请输入上行带宽 up_mbps" "100")"
   down_mbps="$(prompt_default "请输入下行带宽 down_mbps" "100")"
