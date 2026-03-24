@@ -287,7 +287,7 @@ enable_clash_api_preset() {
 
   local controller secret ui_dir ui_url ui_detour default_mode allow_origin allow_private
   ui_dir="dashboard"
-  ui_detour=""
+  ui_detour="direct"
   default_mode="${CLASH_API_DEFAULT_MODE:-Rule}"
   allow_origin="${CLASH_API_ALLOW_ORIGIN:-}"
   allow_private="${CLASH_API_ALLOW_PRIVATE:-false}"
@@ -410,7 +410,7 @@ change_clash_api_ui() {
     "${CLASH_API_CONTROLLER}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${UI_PRESET_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${CLASH_API_SECRET}" \
     "${CLASH_API_DEFAULT_MODE:-Rule}" \
     "${CLASH_API_ALLOW_ORIGIN}" \
@@ -439,7 +439,7 @@ set_clash_api_secret() {
     "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${CLASH_API_UI_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${new_secret}" \
     "${CLASH_API_DEFAULT_MODE:-Rule}" \
     "${CLASH_API_ALLOW_ORIGIN}" \
@@ -462,7 +462,7 @@ set_clash_api_controller() {
     "${controller}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${CLASH_API_UI_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${CLASH_API_SECRET:-$(gen_api_secret)}" \
     "${CLASH_API_DEFAULT_MODE:-Rule}" \
     "${CLASH_API_ALLOW_ORIGIN}" \
@@ -496,7 +496,7 @@ set_clash_api_default_mode() {
     "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${CLASH_API_UI_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${CLASH_API_SECRET:-$(gen_api_secret)}" \
     "${mode}" \
     "${CLASH_API_ALLOW_ORIGIN}" \
@@ -512,7 +512,7 @@ set_clash_api_default_mode() {
 set_clash_api_ui_detour() {
   load_clash_api_current
   local detour
-  detour="$(prompt_default "请输入 UI 下载出口 tag（留空走默认出口）" "${CLASH_API_UI_DETOUR}")"
+  detour="$(prompt_default "请输入 UI 下载出口 tag（留空走默认出口）" "${CLASH_API_UI_DETOUR:-direct}")"
 
   if ! apply_clash_api_settings \
     "enable" \
@@ -542,7 +542,7 @@ set_clash_api_cors_origin() {
     "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${CLASH_API_UI_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${CLASH_API_SECRET:-$(gen_api_secret)}" \
     "${CLASH_API_DEFAULT_MODE:-Rule}" \
     "${origin}" \
@@ -568,7 +568,7 @@ set_clash_api_allow_private_network() {
     "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
     "${CLASH_API_UI_DIR:-dashboard}" \
     "${CLASH_API_UI_URL}" \
-    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_UI_DETOUR:-direct}" \
     "${CLASH_API_SECRET:-$(gen_api_secret)}" \
     "${CLASH_API_DEFAULT_MODE:-Rule}" \
     "${CLASH_API_ALLOW_ORIGIN}" \
