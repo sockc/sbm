@@ -392,6 +392,7 @@ save_hy2_meta() {
   local obfs_password="$6"
   local up_mbps="$7"
   local down_mbps="$8"
+  local cert_mode="$9"
 
   cat > "${BASE_DIR}/hy2-meta.json" <<JSON
 {
