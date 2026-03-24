@@ -32,15 +32,91 @@ source "${BASE_DIR}/lib/clash_api.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/template.sh"
 
+get_header_ui_info() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, os, sys
+
+cfg_path = sys.argv[1]
+
+if not os.path.exists(cfg_path):
+    print("未启用")
+    print("<空>")
+    raise SystemExit(0)
+
+try:
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+except Exception:
+    print("配置异常")
+    print("<空>")
+    raise SystemExit(0)
+
+clash = cfg.get("experimental", {}).get("clash_api", {})
+controller = str(clash.get("external_controller", "") or "")
+ui_dir = str(clash.get("external_ui", "") or "")
+
+if not controller:
+    print("未启用")
+    print("<空>")
+    raise SystemExit(0)
+
+if not ui_dir:
+    print("已启用（无 UI）")
+    print("<空>")
+    raise SystemExit(0)
+
+host = controller
+port = ""
+if controller.startswith("["):
+    if "]:" in controller:
+        host, port = controller.rsplit(":", 1)
+else:
+    if ":" in controller:
+        host, port = controller.rsplit(":", 1)
+
+if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+    ui_url = f"http://127.0.0.1:{port}/ui/" if port else "<空>"
+elif host in ("0.0.0.0", "::", "[::]"):
+    ui_url = f"http://服务器IP:{port}/ui/" if port else "<空>"
+else:
+    ui_url = f"http://{host}:{port}/ui/" if port else "<空>"
+
+print("已启用")
+print(ui_url)
+PY
+}
+
 show_header() {
   clear
+
+  local svc_status="未安装"
+  local sb_version="未安装"
+  local ui_status="未启用"
+  local ui_url="<空>"
+
+  if command -v sing-box >/dev/null 2>&1; then
+    sb_version="$(sing-box version 2>/dev/null | head -n1 || echo unknown)"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  if [ -f "${CONFIG_DIR}/config.json" ] && command -v python3 >/dev/null 2>&1; then
+    mapfile -t _ui_info < <(get_header_ui_info)
+    ui_status="${_ui_info[0]:-未启用}"
+    ui_url="${_ui_info[1]:-<空>}"
+  fi
+
   echo "======================================"
   echo "        Sing-box Manager (sbm)"
   echo "======================================"
-  echo "脚本版本: ${SBM_VERSION}"
-  echo "推荐内核: ${DEFAULT_SINGBOX_VERSION}"
-  echo "配置目录: ${CONFIG_DIR}"
-  echo "--------------------------------------"
+  echo "脚本版本 : ${SBM_VERSION}"
+  echo "sing-box : ${sb_version}"
+  echo "服务状态 : ${svc_status}"
+  echo "UI状态   : ${ui_status}"
+  echo "UI地址   : ${ui_url}"
+  echo "======================================"
+}
 
   local svc_status="未安装"
   local listen_ports="<无>"
