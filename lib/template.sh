@@ -372,22 +372,26 @@ def resolve_members(members, all_nodes):
             for tag in all_nodes:
                 if tag not in result:
                     result.append(tag)
+
         elif item.startswith("MATCH:"):
             needle = item.split(":", 1)[1]
             for tag in all_nodes:
                 if needle in tag and tag not in result:
                     result.append(tag)
+
         else:
+            if item == "自动选择" and not all_nodes:
+                continue
             if item not in result:
                 result.append(item)
     return result
-
+    
 # 先建 auto
 generated = []
 if remote_tags:
     generated.append({
         "type": "urltest",
-        "tag": "auto",
+        "tag": "自动选择",
         "outbounds": remote_tags,
         "interrupt_exist_connections": False
     })
