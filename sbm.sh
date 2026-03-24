@@ -152,18 +152,18 @@ show_service_status() {
 main_menu() {
   while true; do
     show_header
-    echo "1. 安装/升级"
-    echo "2. 入站管理"
-    echo "3. 用户管理"
-    echo "4. 导出URI"
-    echo "5. 出站管理"
-    echo "6. 面板管理"
-    echo "7. 模板管理"
-    echo "8. 防火墙管理"
-    echo "9. 备份与恢复"
+    echo "1.  安装/升级"
+    echo "2.  入站管理"
+    echo "3.  用户管理"
+    echo "4.  导出URI"
+    echo "5.  出站管理"
+    echo "6.  面板管理"
+    echo "7.  模板管理"
+    echo "8.  防火墙管理"
+    echo "9.  备份与恢复"
     echo "10. 服务状态"
-    echo "11. 脚本自更新"
-    echo "0. 退出"
+    echo "11. 更新脚本"
+    echo "0.  退出"
     echo
 
     read -r -p "请选择 [0-11]: " choice
