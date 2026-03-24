@@ -636,42 +636,6 @@ PY
   pause_enter
 }
 
-show_current_inbounds() {
-  if [ ! -f "${CONFIG_DIR}/config.json" ]; then
-    echo "未找到 ${CONFIG_DIR}/config.json"
-    pause_enter
-    return 1
-  fi
-
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys
-
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-inbounds = cfg.get("inbounds", [])
-
-print("当前入站：")
-print("编号 标签                 类型         监听地址")
-print("----------------------------------------------------------------")
-
-idx = 1
-for ib in inbounds:
-    tag = ib.get("tag", "")
-    typ = ib.get("type", "")
-    listen = ib.get("listen", "")
-    port = ib.get("listen_port", "")
-    endpoint = f"{listen}:{port}" if listen and port else f"{listen or '<空>'}:{port or '<空>'}"
-    print(f"{idx:<4} {tag:<20} {typ:<12} {endpoint}")
-    idx += 1
-
-if idx == 1:
-    print("<暂无入站>")
-
-print("----------------------------------------------------------------")
-PY
-
-  pause_enter
-}
-
 save_hy2_meta() {
   local connect_host="$1"
   local listen_port="$2"
