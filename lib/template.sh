@@ -256,6 +256,15 @@ private_rule = {
 template_name = "自定义/未知"
 nr = normalize_rules(rules)
 
+has_cn_proxy_rule = any(r.get("outbound") == "cn-proxy" for r in rules)
+has_proxy_rule = any(r.get("outbound") == "proxy" for r in rules)
+
+cn_selector = None
+for ob in cfg.get("outbounds", []):
+    if ob.get("tag") == "cn-proxy" and ob.get("type") == "selector":
+        cn_selector = ob
+        break
+
 if nr == [private_rule] and final == "proxy":
     template_name = "最小模板"
 elif nr == [private_rule, local_rule] and final == "proxy":
@@ -264,6 +273,8 @@ elif nr == [] and final == "proxy":
     template_name = "全局代理模板"
 elif nr == [private_rule, local_rule] and final == "direct":
     template_name = "直连优先模板"
+elif final == "proxy" and has_cn_proxy_rule and has_proxy_rule and cn_selector is not None:
+    template_name = "策略文件模板"
 
 print(f"当前模板        : {template_name}")
 print(f"route.final     : {final or '<空>'}")
