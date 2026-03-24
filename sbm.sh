@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_DIR="/usr/local/share/sbm"
+
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/env.sh"
 # shellcheck disable=SC1091
@@ -18,11 +19,17 @@ source "${BASE_DIR}/lib/inbound.sh"
 source "${BASE_DIR}/lib/export.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/user.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/outbound.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/firewall.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/backup.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/self_update.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/clash_api.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/template.sh"
 
 show_header() {
@@ -34,12 +41,17 @@ show_header() {
   echo "推荐内核: ${DEFAULT_SINGBOX_VERSION}"
   echo "配置目录: ${CONFIG_DIR}"
   echo "--------------------------------------"
-  ss -lntup 2>/dev/null | grep -E 'sing-box|:9066|:9090|:443|:8443' || true
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntup 2>/dev/null | grep -E 'sing-box|:9066|:9090|:443|:8443' || true
+  fi
+
   if command -v sing-box >/dev/null 2>&1; then
     echo "sing-box: 已安装 ($(sing-box version 2>/dev/null | head -n1 || echo unknown))"
   else
     echo "sing-box: 未安装"
   fi
+
   echo "======================================"
 }
 
@@ -71,6 +83,11 @@ show_service_status() {
   echo "--------------------------------------"
 
   systemctl --no-pager --full status "${unit}" || true
+
+  echo "--------------------------------------"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntup 2>/dev/null | grep -E 'sing-box|:9066|:9090|:443|:8443' || true
+  fi
 }
 
 main_menu() {
