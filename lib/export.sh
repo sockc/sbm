@@ -173,7 +173,7 @@ params = {
     "fp": meta.get("fingerprint", "chrome"),
     "pbk": meta["public_key"],
     "sid": meta["short_id"],
-    "type": "tcp",
+    "type": "tcp"
 }
 
 query = urllib.parse.urlencode(params)
@@ -215,6 +215,7 @@ PY
 
   user_name="${user_line%%|*}"
   user_uuid="${user_line##*|}"
+
   uri="$(build_reality_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}")" || {
     err "生成 Reality URI 失败"
     pause_enter
@@ -629,7 +630,7 @@ PY
 }
 
 export_tuic_uri() {
-  local meta_file idx uri
+  local meta_file uri
 
   meta_file="$(select_protocol_meta_file "tuic" "TUIC")" || {
     pause_enter
