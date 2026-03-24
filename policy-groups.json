@@ -1,111 +1,110 @@
-{
-  "groups": {
-    "中国节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇨🇳", "MATCH:中国", "MATCH:cudy"],
-      "default": "direct"
-    },
-    "香港节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇭🇰", "MATCH:香港"],
-      "default": "direct"
-    },
-    "台湾节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇹🇼", "MATCH:台湾"],
-      "default": "direct"
-    },
-    "日本节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇯🇵", "MATCH:日本"],
-      "default": "direct"
-    },
-    "新加坡节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"],
-      "default": "direct"
-    },
-    "美国节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇺🇸", "MATCH:美国"],
-      "default": "direct"
-    },
-    "英国节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇬🇧", "MATCH:英国"],
-      "default": "direct"
-    },
-    "德国节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇩🇪", "MATCH:德国"],
-      "default": "direct"
-    },
-    "荷兰节点": {
-      "type": "selector",
-      "members": ["direct", "MATCH:🇳🇱", "MATCH:荷兰"],
-      "default": "direct"
-    },
-
-    "手动切换": {
-      "type": "selector",
-      "members": [
-        "direct",
-        "自动选择",
-        "中国节点",
-        "香港节点",
-        "台湾节点",
-        "日本节点",
-        "新加坡节点",
-        "美国节点",
-        "英国节点",
-        "德国节点",
-        "荷兰节点",
-        "ALL_NODES"
-      ],
-      "default": "自动选择"
-    },
-
-    "谷歌服务": {
-      "type": "selector",
-      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    },
-    "YouTube": {
-      "type": "selector",
-      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    },
-    "人工智能": {
-      "type": "selector",
-      "members": ["美国节点", "新加坡节点", "日本节点", "香港节点", "台湾节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "美国节点"
-    },
-    "Spotify": {
-      "type": "selector",
-      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    },
-    "Telegram": {
-      "type": "selector",
-      "members": ["新加坡节点", "香港节点", "台湾节点", "日本节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "新加坡节点"
-    },
-    "跨境金融": {
-      "type": "selector",
-      "members": ["香港节点", "新加坡节点", "英国节点", "美国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    },
-    "流媒体": {
-      "type": "selector",
-      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    },
-    "社交平台": {
-      "type": "selector",
-      "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
-      "default": "香港节点"
-    }
+"groups": {
+  "手动切换": {
+    "type": "selector",
+    "members": [
+      "direct",
+      "自动选择",
+      "中国节点",
+      "香港节点",
+      "台湾节点",
+      "日本节点",
+      "新加坡节点",
+      "美国节点",
+      "英国节点",
+      "德国节点",
+      "荷兰节点",
+      "ALL_NODES"
+    ],
+    "default": "自动选择"
   },
+
+  "谷歌服务": {
+    "type": "selector",
+    "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+  "YouTube": {
+    "type": "selector",
+    "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+  "人工智能": {
+    "type": "selector",
+    "members": ["美国节点", "新加坡节点", "日本节点", "香港节点", "台湾节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "美国节点"
+  },
+  "Spotify": {
+    "type": "selector",
+    "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+  "Telegram": {
+    "type": "selector",
+    "members": ["新加坡节点", "香港节点", "台湾节点", "日本节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "新加坡节点"
+  },
+  "跨境金融": {
+    "type": "selector",
+    "members": ["香港节点", "新加坡节点", "英国节点", "美国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+  "流媒体": {
+    "type": "selector",
+    "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+  "社交平台": {
+    "type": "selector",
+    "members": ["香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+    "default": "香港节点"
+  },
+
+  "中国节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇨🇳", "MATCH:中国", "MATCH:cudy"],
+    "default": "direct"
+  },
+  "香港节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇭🇰", "MATCH:香港"],
+    "default": "direct"
+  },
+  "台湾节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇹🇼", "MATCH:台湾"],
+    "default": "direct"
+  },
+  "日本节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇯🇵", "MATCH:日本"],
+    "default": "direct"
+  },
+  "新加坡节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"],
+    "default": "direct"
+  },
+  "美国节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇺🇸", "MATCH:美国"],
+    "default": "direct"
+  },
+  "英国节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇬🇧", "MATCH:英国"],
+    "default": "direct"
+  },
+  "德国节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇩🇪", "MATCH:德国"],
+    "default": "direct"
+  },
+  "荷兰节点": {
+    "type": "selector",
+    "members": ["direct", "MATCH:🇳🇱", "MATCH:荷兰"],
+    "default": "direct"
+  }
+}
 
   "rules": {
     "direct_domain_suffix": [
