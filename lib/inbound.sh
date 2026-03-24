@@ -127,27 +127,47 @@ restart_singbox_service() {
 }
 
 save_reality_meta() {
-  local connect_host="$1"
-  local listen_port="$2"
-  local server_name="$3"
-  local public_key="$4"
-  local short_id="$5"
+  local reality_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local user_uuid="$5"
+  local flow="$6"
+  local server_name="$7"
+  local handshake_server="$8"
+  local handshake_port="$9"
+  local public_key="${10}"
+  local private_key="${11}"
+  local short_id="${12}"
+  local tcp_fast_open="${13}"
 
-  cat > "${META_FILE}" <<JSON
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${reality_tag}")"
+
+  cat > "${meta_file}" <<JSON
 {
+  "protocol": "vless-reality",
+  "tag": "${reality_tag}",
   "connect_host": "${connect_host}",
   "listen_port": ${listen_port},
+  "user_name": "${user_name}",
+  "uuid": "${user_uuid}",
+  "flow": "${flow}",
   "server_name": "${server_name}",
+  "handshake_server": "${handshake_server}",
+  "handshake_port": ${handshake_port},
   "public_key": "${public_key}",
+  "private_key": "${private_key}",
   "short_id": "${short_id}",
-  "flow": "xtls-rprx-vision",
+  "tcp_fast_open": "${tcp_fast_open}",
   "type": "tcp",
   "security": "reality",
   "fingerprint": "${DEFAULT_CLIENT_FP}"
 }
 JSON
 
-  chmod 600 "${META_FILE}" 2>/dev/null || true
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 deploy_vless_reality() {
@@ -160,25 +180,29 @@ deploy_vless_reality() {
   fi
 
   mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
 
+  local reality_tag
   local listen_addr listen_port user_name user_uuid
   local server_name handshake_server handshake_port
   local short_id keys private_key public_key
-  local connect_host tcp_fast_open config_tmp
-  local default_host
+  local connect_host tcp_fast_open tmp_file
+  local default_host flow
 
   default_host="$(detect_connect_host)"
-  [ -z "$default_host" ] && default_host="YOUR_SERVER_IP"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP"
 
+  reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
   listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_listen_port)"
-  user_name="$(prompt_default "请输入用户备注" "user1")"
-  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
+  user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
+  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
   server_name="$(prompt_default "请输入伪装域名 server_name" "www.cloudflare.com")"
-  handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "$server_name")"
+  handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "${server_name}")"
   handshake_port="$(prompt_default "请输入 Reality 握手目标端口" "443")"
   short_id="$(prompt_default "请输入 short_id" "$(gen_short_id)")"
-  connect_host="$(prompt_default "请输入客户端连接地址" "$default_host")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  flow="xtls-rprx-vision"
 
   if confirm_default_no "开启 TCP Fast Open 吗？"; then
     tcp_fast_open="true"
@@ -196,6 +220,7 @@ deploy_vless_reality() {
 
   echo
   echo "========== 配置预览 =========="
+  echo "实例标签       : ${reality_tag}"
   echo "监听地址       : ${listen_addr}"
   echo "监听端口       : ${listen_port}"
   echo "用户备注       : ${user_name}"
@@ -214,84 +239,100 @@ deploy_vless_reality() {
     return 0
   fi
 
-  config_tmp="${TMP_DIR}/config.json"
+  tmp_file="${TMP_DIR}/config.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
-  cat > "${config_tmp}" <<JSON
-{
-  "log": {
-    "level": "warn",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-reality-in",
-      "listen": "${listen_addr}",
-      "listen_port": ${listen_port},
-      "tcp_fast_open": ${tcp_fast_open},
-      "users": [
+  if ! python3 - "${tmp_file}" \
+    "${reality_tag}" "${listen_addr}" "${listen_port}" "${tcp_fast_open}" \
+    "${user_name}" "${user_uuid}" "${flow}" \
+    "${server_name}" "${handshake_server}" "${handshake_port}" \
+    "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+    path_cfg, reality_tag, listen_addr, listen_port, tcp_fast_open,
+    user_name, user_uuid, flow,
+    server_name, handshake_server, handshake_port,
+    private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+reality_obj = {
+    "type": "vless",
+    "tag": reality_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "tcp_fast_open": (tcp_fast_open == "true"),
+    "users": [
         {
-          "name": "${user_name}",
-          "uuid": "${user_uuid}",
-          "flow": "xtls-rprx-vision"
+            "name": user_name,
+            "uuid": user_uuid,
+            "flow": flow
         }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${server_name}",
+    ],
+    "tls": {
+        "enabled": True,
+        "server_name": server_name,
         "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${handshake_server}",
-            "server_port": ${handshake_port}
-          },
-          "private_key": "${private_key}",
-          "short_id": [
-            "${short_id}"
-          ]
+            "enabled": True,
+            "handshake": {
+                "server": handshake_server,
+                "server_port": int(handshake_port)
+            },
+            "private_key": private_key,
+            "short_id": [short_id]
         }
-      }
     }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    },
-    {
-      "type": "block",
-      "tag": "block"
-    }
-  ],
-  "route": {
-    "final": "direct"
-  }
 }
-JSON
 
-  if ! check_config_file "${config_tmp}"; then
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == reality_tag:
+        inbounds[i] = reality_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(reality_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Reality 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
     err "配置校验失败，未覆盖正式配置"
     pause_enter
     return 1
   fi
 
-  activate_config_file "${config_tmp}"
+  activate_config_file "${tmp_file}"
 
   if ! restart_singbox_service; then
     err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
     pause_enter
     return 1
   fi
-  
-  save_reality_meta "${connect_host}" "${listen_port}" "${server_name}" "${public_key}" "${short_id}"
+
+  save_reality_meta \
+    "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${user_uuid}" \
+    "${flow}" "${server_name}" "${handshake_server}" "${handshake_port}" \
+    "${public_key}" "${private_key}" "${short_id}" "${tcp_fast_open}"
 
   ok "VLESS + Reality 部署完成"
   echo
   echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${reality_tag}"
   echo "地址        : ${connect_host}"
   echo "端口        : ${listen_port}"
   echo "UUID        : ${user_uuid}"
-  echo "流控        : xtls-rprx-vision"
+  echo "流控        : ${flow}"
   echo "传输        : tcp"
   echo "TLS         : reality"
   echo "SNI         : ${server_name}"
