@@ -739,7 +739,8 @@ save_vmess_meta() {
   local server_name="$7"
   local path="$8"
   local host="$9"
-  local cert_mode="${10}"
+  local method="${10}"
+  local cert_mode="${11}"
 
   cat > "${BASE_DIR}/vmess-meta.json" <<JSON
 {
@@ -752,6 +753,7 @@ save_vmess_meta() {
   "server_name": "${server_name}",
   "path": "${path}",
   "host": "${host}",
+  "method": "${method}",
   "cert_mode": "${cert_mode}"
 }
 JSON
@@ -1004,8 +1006,8 @@ PY
     return 1
   fi
 
-  save_vmess_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${cert_mode}"
-
+  save_vmess_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
+  
   ok "VMess 部署完成"
   echo
   echo "------ VMess 客户端关键参数 ------"
