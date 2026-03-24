@@ -67,6 +67,11 @@ exec /usr/local/share/sbm/sbm.sh "$@"
 EOF
   chmod +x "$BIN_PATH"
 
+  if [ ! -f "${INSTALL_DIR}/policy-groups.json" ]; then
+  fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/policy-groups.json" > "${INSTALL_DIR}/policy-groups.json"
+  chmod 644 "${INSTALL_DIR}/policy-groups.json"
+fi
+
   cat > "${INSTALL_DIR}/install.env" <<EOF
 SBM_REPO="${REPO}"
 SBM_BRANCH="${BRANCH}"
