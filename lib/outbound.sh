@@ -852,9 +852,130 @@ PY
 show_current_proxy_selection() {
   require_outbound_manage_env || return 1
 
-  local resp
-  if ! resp="$(clash_api_request "GET" "/proxies/proxy")"; then
-    err "读取当前 selector 状态失败"
+urlencode_text() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe=''))
+PY
+}
+
+clash_api_request() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+
+  local controller secret
+  mapfile -t _clash_runtime < <(get_clash_api_runtime)
+  controller="${_clash_runtime[0]:-}"
+  secret="${_clash_runtime[1]:-}"
+
+  if [ -z "${controller}" ]; then
+    err "Clash API 未启用，请先到 Clash API 管理里开启"
+    return 1
+  fi
+
+  local url="http://${controller}${path}"
+
+  if has_cmd curl; then
+    if [ -n "${secret}" ]; then
+      if [ -n "${body}" ]; then
+        curl -fsSL -X "${method}" \
+          -H "Authorization: Bearer ${secret}" \
+          -H "Content-Type: application/json" \
+          -d "${body}" \
+          "${url}"
+      else
+        curl -fsSL -X "${method}" \
+          -H "Authorization: Bearer ${secret}" \
+          "${url}"
+      fi
+    else
+      if [ -n "${body}" ]; then
+        curl -fsSL -X "${method}" \
+          -H "Content-Type: application/json" \
+          -d "${body}" \
+          "${url}"
+      else
+        curl -fsSL -X "${method}" "${url}"
+      fi
+    fi
+    return $?
+  fi
+
+  if has_cmd wget; then
+    err "当前未实现 wget 版 Clash API 请求，请安装 curl"
+    return 1
+  fi
+
+  err "未找到 curl"
+  return 1
+}
+
+show_selector_candidates() {
+  require_outbound_manage_env || return 1
+
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+selector = None
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
+        selector = ob
+        break
+
+if not selector:
+    print("未找到 手动切换 selector")
+    raise SystemExit(1)
+
+members = selector.get("outbounds", [])
+print("可切换节点：")
+print("编号 标签")
+print("------------------------------")
+for i, tag in enumerate(members, 1):
+    print(f"{i:<4} {tag}")
+print("------------------------------")
+PY
+}
+
+get_selector_member_by_index() {
+  local idx="$1"
+  python3 - "${CONFIG_DIR}/config.json" "$idx" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+selector = None
+for ob in cfg.get("outbounds", []):
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
+        selector = ob
+        break
+
+if not selector:
+    print("未找到 手动切换 selector", file=sys.stderr)
+    raise SystemExit(1)
+
+members = selector.get("outbounds", [])
+if idx < 1 or idx > len(members):
+    print("编号超出范围", file=sys.stderr)
+    raise SystemExit(1)
+
+print(members[idx - 1])
+PY
+}
+
+show_current_proxy_selection() {
+  require_outbound_manage_env || return 1
+
+  local selector_name selector_path resp
+  selector_name="手动切换"
+  selector_path="/proxies/$(urlencode_text "${selector_name}")"
+
+  if ! resp="$(clash_api_request "GET" "${selector_path}")"; then
+    err "读取当前 手动切换 组状态失败"
     pause_enter
     return 1
   fi
@@ -864,7 +985,7 @@ import json
 import os
 
 data = json.loads(os.environ["RESP_JSON"])
-print("当前 proxy selector 状态：")
+print("当前手动切换组状态：")
 print(f"name   : {data.get('name', '<空>')}")
 print(f"type   : {data.get('type', '<空>')}")
 print(f"now    : {data.get('now', '<空>')}")
@@ -883,7 +1004,7 @@ switch_proxy_selector() {
   show_selector_candidates
   echo
 
-  local idx target body
+  local idx target body selector_name selector_path
   idx="$(prompt_required "请输入要切换到的节点编号")"
   target="$(get_selector_member_by_index "${idx}")" || {
     err "读取节点失败"
@@ -891,21 +1012,24 @@ switch_proxy_selector() {
     return 1
   }
 
-  echo "准备切换 proxy selector 到：${target}"
+  echo "准备切换 手动切换 组到：${target}"
   if ! confirm_default_yes "确认继续吗？"; then
     warn "已取消"
     pause_enter
     return 0
   fi
 
-  body="$(python3 - <<'PY' "${target}"
+  body="$(python3 - "${target}" <<'PY'
 import json, sys
 print(json.dumps({"name": sys.argv[1]}, ensure_ascii=False))
 PY
 )"
 
-  if ! clash_api_request "PUT" "/proxies/proxy" "${body}" >/dev/null; then
-    err "切换 selector 失败"
+  selector_name="手动切换"
+  selector_path="/proxies/$(urlencode_text "${selector_name}")"
+
+  if ! clash_api_request "PUT" "${selector_path}" "${body}" >/dev/null; then
+    err "切换 手动切换 组失败"
     pause_enter
     return 1
   fi
