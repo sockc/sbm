@@ -645,10 +645,28 @@ show_current_applied_nodes() {
   require_outbound_manage_env || return 1
 
   python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, re, sys
+import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 outbounds = cfg.get("outbounds", [])
+
+REMOTE_TYPES = {
+    "socks",
+    "http",
+    "shadowsocks",
+    "vmess",
+    "trojan",
+    "wireguard",
+    "hysteria",
+    "vless",
+    "shadowtls",
+    "tuic",
+    "hysteria2",
+    "anytls",
+    "tor",
+    "ssh",
+    "naive",
+}
 
 print("当前已应用节点：")
 print("编号 标签         类型         服务器")
@@ -658,8 +676,12 @@ idx = 1
 for ob in outbounds:
     tag = ob.get("tag", "")
     typ = ob.get("type", "")
-    if not re.fullmatch(r"node-\d+", tag or ""):
+
+    if typ not in REMOTE_TYPES:
         continue
+    if tag in ("direct", "block", "proxy", "auto", "dns-out"):
+        continue
+
     server = ob.get("server", "") or ob.get("server_name", "") or ob.get("address", "") or ob.get("endpoint", "")
     port = ob.get("server_port", "") or ob.get("port", "")
     endpoint = f"{server}:{port}" if server and port else (server or "<未知>")
