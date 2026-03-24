@@ -541,21 +541,29 @@ menu_export_client() {
   while true; do
     clear
     echo "======================================"
-    echo "          导出客户端配置"
+    echo "            导出客户端配置"
     echo "======================================"
     echo "1. 导出单个用户 VLESS URI"
     echo "2. 导出全部用户 VLESS URI"
     echo "3. 导出 Hysteria2 URI"
     echo "4. 导出 Hysteria2 sing-box JSON"
+    echo "5. 导出 VMess URI"
+    echo "6. 导出 VMess sing-box JSON"
+    echo "7. 导出 TUIC URI"
+    echo "8. 导出 TUIC sing-box JSON"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-4]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) export_single_user_uri ;;
       2) export_all_user_uris ;;
       3) export_hy2_uri ;;
       4) export_hy2_singbox_json ;;
+      5) export_vmess_uri ;;
+      6) export_vmess_singbox_json ;;
+      7) export_tuic_uri ;;
+      8) export_tuic_singbox_json ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
