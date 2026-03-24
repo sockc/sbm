@@ -282,6 +282,61 @@ export_hy2_singbox_json() {
   pause_enter
 }
 
+list_protocol_meta_files() {
+  local protocol="$1"
+
+  python3 - "${INBOUND_META_DIR}" "${protocol}" <<'PY'
+import json, pathlib, sys
+
+base = pathlib.Path(sys.argv[1])
+protocol = sys.argv[2]
+
+if not base.exists():
+    raise SystemExit(0)
+
+rows = []
+for p in base.glob("*.json"):
+    try:
+        meta = json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    if meta.get("protocol") == protocol:
+        rows.append((p.stat().st_mtime, str(p)))
+
+for _, path in sorted(rows, reverse=True):
+    print(path)
+PY
+}
+
+get_protocol_meta_by_index() {
+  local protocol="$1"
+  local idx="$2"
+  list_protocol_meta_files "${protocol}" | sed -n "${idx}p"
+}
+
+show_vmess_meta_list() {
+  local idx=1 found=0
+  echo "编号 标签               传输      端口"
+  echo "---------------------------------------------"
+
+  while IFS= read -r f; do
+    [ -z "${f}" ] && continue
+    found=1
+    python3 - "$f" "$idx" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = sys.argv[2]
+print(f"{idx:<4} {meta.get('tag',''):<18} {meta.get('transport_type',''):<8} {meta.get('listen_port','')}")
+PY
+    idx=$((idx + 1))
+  done < <(list_protocol_meta_files "vmess")
+
+  if [ "$found" -eq 0 ]; then
+    echo "<暂无 VMess 实例>"
+  fi
+  echo "---------------------------------------------"
+}
+
 require_vmess_meta_file() {
   local vmess_meta="${BASE_DIR}/vmess-meta.json"
   if [ ! -f "${vmess_meta}" ]; then
@@ -291,7 +346,7 @@ require_vmess_meta_file() {
 }
 
 build_vmess_uri() {
-  local vmess_meta="${BASE_DIR}/vmess-meta.json"
+  local vmess_meta="$1"
 
   python3 - "${vmess_meta}" <<'PY'
 import base64, json, sys
@@ -306,7 +361,7 @@ path = str(meta.get("path", "/") or "/")
 
 obj = {
     "v": "2",
-    "ps": str(meta.get("user_name", "vmess")),
+    "ps": str(meta.get("user_name", meta.get("tag", "vmess"))),
     "add": str(meta["connect_host"]),
     "port": str(meta["listen_port"]),
     "id": str(meta["uuid"]),
@@ -326,7 +381,7 @@ PY
 }
 
 build_vmess_singbox_json() {
-  local vmess_meta="${BASE_DIR}/vmess-meta.json"
+  local vmess_meta="$1"
 
   python3 - "${vmess_meta}" <<'PY'
 import json, sys
@@ -383,10 +438,20 @@ PY
 }
 
 export_vmess_uri() {
-  require_vmess_meta_file || { pause_enter; return 1; }
+  local meta_file idx uri
 
-  local uri
-  uri="$(build_vmess_uri)" || {
+  show_vmess_meta_list
+  echo
+  idx="$(prompt_required "请输入要导出的 VMess 编号")"
+  meta_file="$(get_protocol_meta_by_index "vmess" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    pause_enter
+    return 1
+  fi
+
+  uri="$(build_vmess_uri "${meta_file}")" || {
     err "生成 VMess URI 失败"
     pause_enter
     return 1
@@ -397,18 +462,29 @@ export_vmess_uri() {
   echo "${uri}"
   echo "-----------------------"
   echo
-  echo "说明：这是常见兼容格式的 vmess:// 链接；不同客户端对 VMess 分享链接的兼容并不完全统一。"
+  echo "说明：这是常见兼容格式的 vmess:// 链接；不同客户端兼容性不完全一致。"
   echo
 
   pause_enter
 }
 
 export_vmess_singbox_json() {
-  require_vmess_meta_file || { pause_enter; return 1; }
+  local meta_file idx
+
+  show_vmess_meta_list
+  echo
+  idx="$(prompt_required "请输入要导出的 VMess 编号")"
+  meta_file="$(get_protocol_meta_by_index "vmess" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    pause_enter
+    return 1
+  fi
 
   echo
   echo "------ VMess sing-box 客户端 JSON ------"
-  build_vmess_singbox_json || {
+  build_vmess_singbox_json "${meta_file}" || {
     err "生成 VMess 客户端 JSON 失败"
     pause_enter
     return 1
