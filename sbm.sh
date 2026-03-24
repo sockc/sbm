@@ -42,8 +42,29 @@ show_header() {
   echo "配置目录: ${CONFIG_DIR}"
   echo "--------------------------------------"
 
+  local svc_status="未安装"
+  local listen_ports="<无>"
+
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
   if command -v ss >/dev/null 2>&1; then
-    ss -lntup 2>/dev/null | grep -E 'sing-box|:9066|:9090|:443|:8443' || true
+    listen_ports="$(
+      ss -lntup 2>/dev/null \
+      | awk '/sing-box/ {
+          n=split($5, a, ":");
+          port=a[n];
+          gsub(/^\[|\]$/, "", port);
+          if (port != "" && !seen[port]++) ports[++c]=port
+        }
+        END {
+          if (c==0) { print "<无>"; exit }
+          for (i=1; i<=c; i++) {
+            printf "%s%s", ports[i], (i<c ? ", " : "")
+          }
+        }'
+    )"
   fi
 
   if command -v sing-box >/dev/null 2>&1; then
@@ -52,6 +73,8 @@ show_header() {
     echo "sing-box: 未安装"
   fi
 
+  echo "服务状态: ${svc_status}"
+  echo "监听端口: ${listen_ports}"
   echo "======================================"
 }
 
