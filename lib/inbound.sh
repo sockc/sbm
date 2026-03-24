@@ -434,8 +434,17 @@ deploy_hysteria2() {
   password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
   server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
   cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
   key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+
   up_mbps="$(prompt_default "请输入上行带宽 up_mbps" "100")"
   down_mbps="$(prompt_default "请输入下行带宽 down_mbps" "100")"
 
