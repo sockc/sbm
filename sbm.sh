@@ -54,7 +54,7 @@ main_menu() {
   while true; do
     show_header
     echo "1. 安装/升级 sing-box 内核"
-    echo "2. 部署 VLESS + Reality"
+    echo "2. 入站管理"
     echo "3. 用户管理"
     echo "4. 导出客户端 URI"
     echo "5. 出站管理"
@@ -70,7 +70,7 @@ main_menu() {
     read -r -p "请选择 [0-11]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
-      2) menu_deploy_vless_reality ;;
+      2) menu_inbound_management ;;
       3) menu_user_management ;;
       4) menu_export_client ;;
       5) menu_outbound_management ;;
