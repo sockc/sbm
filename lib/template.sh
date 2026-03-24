@@ -472,10 +472,12 @@ menu_template_management() {
     echo "4. 应用全局代理模板"
     echo "5. 应用直连优先模板"
     echo "6. 查看当前模板状态"
+    echo "7. 应用策略文件"
+    echo "8. 查看策略文件"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-6]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) rebuild_proxy_selector_now ;;
       2) apply_template_minimal ;;
@@ -483,6 +485,8 @@ menu_template_management() {
       4) apply_template_global ;;
       5) apply_template_direct_first ;;
       6) show_template_status ;;
+      7) apply_policy_groups_file ;;
+      8) show_policy_groups_file ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
