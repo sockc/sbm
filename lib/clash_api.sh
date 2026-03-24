@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 
 require_clash_api_env() {
-  require_config_file || return 1
-  require_python3 || return 1
-  mkdir -p "${TMP_DIR}"
+  if [ ! -f "${CONFIG_DIR}/config.json" ]; then
+    err "未找到 ${CONFIG_DIR}/config.json，请先部署入站实例"
+    return 1
+  fi
+  if ! has_cmd python3; then
+    err "缺少 python3，无法处理 JSON"
+    return 1
+  fi
 }
 
 gen_api_secret() {
@@ -12,46 +17,193 @@ gen_api_secret() {
     return 0
   fi
 
-  if has_cmd python3; then
-    python3 - <<'PY'
+  python3 - <<'PY'
 import secrets
 print(secrets.token_hex(16))
 PY
-    return 0
-  fi
-
-  echo "change-me-$(date +%s)"
 }
 
-get_clash_api_field() {
-  local field="$1"
-  python3 - "${CONFIG_DIR}/config.json" "$field" <<'PY'
+get_clash_api_runtime() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
 import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-field = sys.argv[2]
-
-value = (
-    cfg.get("experimental", {})
-       .get("clash_api", {})
-       .get(field, "")
-)
-
-if isinstance(value, bool):
-    print("true" if value else "false")
-elif isinstance(value, list):
-    print(",".join(str(x) for x in value))
-else:
-    print(value)
+clash = cfg.get("experimental", {}).get("clash_api", {})
+print(clash.get("external_controller", ""))
+print(clash.get("secret", ""))
 PY
 }
 
-apply_clash_api_config() {
-  local tmp_file="$1"
+load_clash_api_current() {
+  mapfile -t _clash_api_vals < <(
+    python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+clash = cfg.get("experimental", {}).get("clash_api", {})
+
+enabled = "true" if clash else "false"
+controller = clash.get("external_controller", "")
+ui_dir = clash.get("external_ui", "")
+ui_url = clash.get("external_ui_download_url", "")
+ui_detour = clash.get("external_ui_download_detour", "")
+secret = clash.get("secret", "")
+default_mode = clash.get("default_mode", "")
+allow_origin = ",".join(clash.get("access_control_allow_origin", [])) if isinstance(clash.get("access_control_allow_origin"), list) else ""
+allow_private = "true" if clash.get("access_control_allow_private_network", False) else "false"
+
+print(enabled)
+print(controller)
+print(ui_dir)
+print(ui_url)
+print(ui_detour)
+print(secret)
+print(default_mode)
+print(allow_origin)
+print(allow_private)
+PY
+  )
+
+  CLASH_API_ENABLED="${_clash_api_vals[0]:-false}"
+  CLASH_API_CONTROLLER="${_clash_api_vals[1]:-}"
+  CLASH_API_UI_DIR="${_clash_api_vals[2]:-}"
+  CLASH_API_UI_URL="${_clash_api_vals[3]:-}"
+  CLASH_API_UI_DETOUR="${_clash_api_vals[4]:-}"
+  CLASH_API_SECRET="${_clash_api_vals[5]:-}"
+  CLASH_API_DEFAULT_MODE="${_clash_api_vals[6]:-}"
+  CLASH_API_ALLOW_ORIGIN="${_clash_api_vals[7]:-}"
+  CLASH_API_ALLOW_PRIVATE="${_clash_api_vals[8]:-false}"
+}
+
+ui_preset_menu() {
+  echo "请选择面板 UI："
+  echo "1. Yacd-meta（兼容优先，默认）"
+  echo "2. MetaCubeXD（功能更多）"
+  echo "3. Zashboard（界面更新）"
+  echo "4. 自定义 UI ZIP 地址"
+}
+
+choose_ui_preset() {
+  local choice custom_url
+  UI_PRESET_NAME=""
+  UI_PRESET_URL=""
+
+  ui_preset_menu
+  read -r -p "请选择 [1-4]（默认 1）: " choice
+  choice="${choice:-1}"
+
+  case "${choice}" in
+    1)
+      UI_PRESET_NAME="Yacd-meta"
+      UI_PRESET_URL=""
+      ;;
+    2)
+      UI_PRESET_NAME="MetaCubeXD"
+      UI_PRESET_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
+      ;;
+    3)
+      UI_PRESET_NAME="Zashboard"
+      UI_PRESET_URL="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+      ;;
+    4)
+      UI_PRESET_NAME="自定义"
+      custom_url="$(prompt_required "请输入 UI ZIP 下载地址")"
+      UI_PRESET_URL="${custom_url}"
+      ;;
+    *)
+      warn "无效选项，已回退到 Yacd-meta"
+      UI_PRESET_NAME="Yacd-meta"
+      UI_PRESET_URL=""
+      ;;
+  esac
+}
+
+clear_clash_ui_dir() {
+  local ui_dir="$1"
+  [ -z "${ui_dir}" ] && ui_dir="dashboard"
+
+  if [ -d "${CONFIG_DIR}/${ui_dir}" ]; then
+    rm -rf "${CONFIG_DIR:?}/${ui_dir}"
+  fi
+}
+
+controller_port() {
+  python3 - "$1" <<'PY'
+import sys
+s = sys.argv[1].strip()
+if not s:
+    print("")
+    raise SystemExit(0)
+if s.startswith('['):
+    # [::1]:9090
+    p = s.rsplit(':', 1)[-1]
+else:
+    p = s.rsplit(':', 1)[-1]
+print(p)
+PY
+}
+
+apply_clash_api_settings() {
+  local mode="$1"                      # enable / disable
+  local controller="${2:-}"
+  local ui_dir="${3:-dashboard}"
+  local ui_url="${4:-}"
+  local ui_detour="${5:-}"
+  local secret="${6:-}"
+  local default_mode="${7:-Rule}"
+  local allow_origin="${8:-}"
+  local allow_private="${9:-false}"
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.clash-api.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${mode}" "${controller}" "${ui_dir}" "${ui_url}" "${ui_detour}" \
+    "${secret}" "${default_mode}" "${allow_origin}" "${allow_private}" <<'PY'
+import json, sys
+
+(
+    path_cfg, mode, controller, ui_dir, ui_url, ui_detour,
+    secret, default_mode, allow_origin, allow_private
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+exp = cfg.setdefault("experimental", {})
+
+if mode == "disable":
+    exp.pop("clash_api", None)
+else:
+    clash = {}
+    clash["external_controller"] = controller
+    clash["external_ui"] = ui_dir
+
+    if ui_url:
+        clash["external_ui_download_url"] = ui_url
+    if ui_detour:
+        clash["external_ui_download_detour"] = ui_detour
+    if secret:
+        clash["secret"] = secret
+
+    clash["default_mode"] = default_mode or "Rule"
+
+    if allow_origin:
+        clash["access_control_allow_origin"] = [x.strip() for x in allow_origin.split(",") if x.strip()]
+    if str(allow_private).lower() == "true":
+        clash["access_control_allow_private_network"] = True
+
+    exp["clash_api"] = clash
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Clash API 配置失败"
+    return 1
+  fi
 
   if ! check_config_file "${tmp_file}"; then
-    err "配置校验失败，未写入正式配置"
-    pause_enter
+    err "配置校验失败，未覆盖正式配置"
     return 1
   fi
 
@@ -59,404 +211,434 @@ apply_clash_api_config() {
 
   if ! restart_singbox_service; then
     err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
-    pause_enter
     return 1
   fi
 
   return 0
 }
 
-prepare_controller_and_secret() {
-  local current_controller current_secret controller secret
-
-  current_controller="$(get_clash_api_field "external_controller")"
-  current_secret="$(get_clash_api_field "secret")"
-
-  controller="${current_controller:-127.0.0.1:9090}"
-  secret="${current_secret}"
-
-  if [ -z "${controller}" ]; then
-    controller="127.0.0.1:9090"
-  fi
-
-  if [[ "${controller}" == 0.0.0.0:* ]] && [ -z "${secret}" ]; then
-    secret="$(gen_api_secret)"
-    echo "检测到监听到 0.0.0.0，已自动生成 secret：${secret}"
-    echo
-  fi
-
-  printf '%s|%s\n' "${controller}" "${secret}"
-}
-
 show_clash_api_status() {
-  require_clash_api_env || return 1
+  require_clash_api_env || {
+    pause_enter
+    return 1
+  }
 
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys
+  load_clash_api_current
 
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-clash = cfg.get("experimental", {}).get("clash_api", {})
+  echo "======================================"
+  echo "           Clash API 状态"
+  echo "======================================"
 
-controller = clash.get("external_controller", "")
-ui = clash.get("external_ui", "")
-secret = clash.get("secret", "")
-download_url = clash.get("external_ui_download_url", "")
-download_detour = clash.get("external_ui_download_detour", "")
+  if [ "${CLASH_API_ENABLED}" != "true" ]; then
+    echo "状态              : 未开启"
+    echo "======================================"
+    pause_enter
+    return 0
+  fi
 
-enabled = bool(controller)
+  local ui_name="自定义/未知"
+  case "${CLASH_API_UI_URL}" in
+    "")
+      ui_name="Yacd-meta（默认）"
+      ;;
+    "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip")
+      ui_name="MetaCubeXD"
+      ;;
+    "https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip")
+      ui_name="Zashboard"
+      ;;
+  esac
 
-print(f"状态                   : {'已开启' if enabled else '已关闭'}")
-print(f"external_controller    : {controller or '<空>'}")
-print(f"external_ui            : {ui or '<空>'}")
-print(f"external_ui_download_url: {download_url or '<空>'}")
-print(f"external_ui_download_detour: {download_detour or '<空>'}")
-print(f"secret                 : {'已设置' if secret else '<空>'}")
+  echo "状态              : 已开启"
+  echo "监听地址          : ${CLASH_API_CONTROLLER:-<空>}"
+  echo "UI 目录           : ${CLASH_API_UI_DIR:-<空>}"
+  echo "UI 预设           : ${ui_name}"
+  echo "UI 下载源         : ${CLASH_API_UI_URL:-默认(Yacd-meta)}"
+  echo "UI 下载出口       : ${CLASH_API_UI_DETOUR:-默认出口}"
+  if [ -n "${CLASH_API_SECRET}" ]; then
+    echo "API Secret        : 已设置"
+  else
+    echo "API Secret        : 未设置"
+  fi
+  echo "默认模式          : ${CLASH_API_DEFAULT_MODE:-Rule}"
+  echo "CORS 允许来源     : ${CLASH_API_ALLOW_ORIGIN:-*}"
+  echo "允许私网访问      : ${CLASH_API_ALLOW_PRIVATE:-false}"
 
-if enabled:
-    print(f"API 地址                : http://{controller}")
-    if ui:
-        print(f"UI 地址                 : http://{controller}/ui")
-PY
+  if [ -n "${CLASH_API_CONTROLLER}" ]; then
+    local port
+    port="$(controller_port "${CLASH_API_CONTROLLER}")"
+    if [ -n "${port}" ]; then
+      echo "UI 地址           : http://127.0.0.1:${port}/ui/"
+    fi
+  fi
 
-  echo
+  echo "======================================"
   pause_enter
 }
 
-enable_clash_api() {
-  require_clash_api_env || return 1
+enable_clash_api_preset() {
+  require_clash_api_env || {
+    pause_enter
+    return 1
+  }
 
-  local current_controller current_secret controller secret tmp_file
-  current_controller="$(get_clash_api_field "external_controller")"
-  current_secret="$(get_clash_api_field "secret")"
+  local preset="$1" # local / public
+  load_clash_api_current
 
-  controller="$(prompt_default "请输入 external_controller" "${current_controller:-127.0.0.1:9090}")"
-  secret="${current_secret}"
+  local controller secret ui_dir ui_url ui_detour default_mode allow_origin allow_private
+  ui_dir="dashboard"
+  ui_detour=""
+  default_mode="${CLASH_API_DEFAULT_MODE:-Rule}"
+  allow_origin="${CLASH_API_ALLOW_ORIGIN:-}"
+  allow_private="${CLASH_API_ALLOW_PRIVATE:-false}"
 
-  if [ -z "${secret}" ] && [[ "${controller}" == 0.0.0.0:* ]]; then
-    secret="$(gen_api_secret)"
-    echo "检测到监听到 0.0.0.0，已自动生成 secret：${secret}"
-    echo
+  choose_ui_preset
+
+  if [ "${preset}" = "local" ]; then
+    controller="127.0.0.1:9090"
+    secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
+  else
+    controller="0.0.0.0:9066"
+    secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
   fi
 
-  tmp_file="${TMP_DIR}/config.clash-api.enable.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  ui_url="${UI_PRESET_URL}"
 
-  if ! python3 - "${tmp_file}" "$controller" "$secret" <<'PY'
-import json, sys
+  echo
+  echo "========== Clash API 预览 =========="
+  if [ "${preset}" = "local" ]; then
+    echo "模式              : 本机面板"
+  else
+    echo "模式              : 公网面板"
+  fi
+  echo "监听地址          : ${controller}"
+  echo "UI 目录           : ${ui_dir}"
+  echo "UI 预设           : ${UI_PRESET_NAME}"
+  echo "UI 下载源         : ${ui_url:-默认(Yacd-meta)}"
+  echo "API Secret        : ${secret}"
+  echo "默认模式          : ${default_mode:-Rule}"
+  echo "===================================="
+  echo
 
-path, controller, secret = sys.argv[1], sys.argv[2], sys.argv[3]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
+  if ! confirm_default_yes "确认启用并自动下载面板 UI 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
 
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
+  clear_clash_ui_dir "${ui_dir}"
 
-clash["external_controller"] = controller
-if secret:
-    clash["secret"] = secret
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "开启 Clash API 失败"
+  if ! apply_clash_api_settings "enable" "${controller}" "${ui_dir}" "${ui_url}" "${ui_detour}" "${secret}" "${default_mode}" "${allow_origin}" "${allow_private}"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "Clash API 已开启"
+  if [ "${preset}" = "public" ]; then
+    local port backend
+    port="$(controller_port "${controller}")"
+    if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+      backend="$(detect_firewall_backend)"
+      if [ "${backend}" != "none" ] && [ -n "${port}" ]; then
+        if confirm_default_yes "是否一键放行 ${port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${port}" "tcp"; then
+            ok "已放行 ${port}/tcp"
+          else
+            err "放行 ${port}/tcp 失败"
+          fi
+        fi
+      fi
+    fi
   fi
 
+  ok "Clash API 已启用，面板将自动下载"
   pause_enter
 }
 
 disable_clash_api() {
-  require_clash_api_env || return 1
+  require_clash_api_env || {
+    pause_enter
+    return 1
+  }
 
-  local tmp_file
-  tmp_file="${TMP_DIR}/config.clash-api.disable.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  load_clash_api_current
+  if [ "${CLASH_API_ENABLED}" != "true" ]; then
+    warn "Clash API 当前未开启"
+    pause_enter
+    return 0
+  fi
 
-  if ! python3 - "${tmp_file}" <<'PY'
-import json, sys
+  if ! confirm_default_yes "确认关闭 Clash API 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
 
-path = sys.argv[1]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-clash["external_controller"] = ""
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "关闭 Clash API 失败"
+  if ! apply_clash_api_settings "disable"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "Clash API 已关闭"
-  fi
-
+  ok "Clash API 已关闭"
   pause_enter
 }
 
-set_clash_api_controller() {
-  require_clash_api_env || return 1
+change_clash_api_ui() {
+  require_clash_api_env || {
+    pause_enter
+    return 1
+  }
 
-  local current controller tmp_file
-  current="$(get_clash_api_field "external_controller")"
-  controller="$(prompt_default "请输入 external_controller" "${current:-127.0.0.1:9090}")"
+  load_clash_api_current
+  if [ "${CLASH_API_ENABLED}" != "true" ]; then
+    warn "请先启用 Clash API"
+    pause_enter
+    return 0
+  fi
 
-  tmp_file="${TMP_DIR}/config.clash-api.controller.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  choose_ui_preset
 
-  if ! python3 - "${tmp_file}" "$controller" <<'PY'
-import json, sys
+  if ! confirm_default_yes "确认切换面板 UI 并自动重新下载吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
 
-path, controller = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
+  clear_clash_ui_dir "${CLASH_API_UI_DIR:-dashboard}"
 
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-clash["external_controller"] = controller
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "设置监听地址失败"
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${UI_PRESET_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_SECRET}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "external_controller 已更新为：${controller}"
-  fi
-
+  ok "面板 UI 已切换为：${UI_PRESET_NAME}"
   pause_enter
 }
 
 set_clash_api_secret() {
-  require_clash_api_env || return 1
+  require_clash_api_env || {
+    pause_enter
+    return 1
+  }
 
-  local current secret tmp_file
-  current="$(get_clash_api_field "secret")"
-  secret="$(prompt_default "请输入 API Secret" "${current:-$(gen_api_secret)}")"
+  load_clash_api_current
 
-  tmp_file="${TMP_DIR}/config.clash-api.secret.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  local new_secret
+  new_secret="$(prompt_default "请输入 API Secret（留空自动生成）" "$(gen_api_secret)")"
 
-  if ! python3 - "${tmp_file}" "$secret" <<'PY'
-import json, sys
-
-path, secret = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-clash["secret"] = secret
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "设置 API Secret 失败"
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${new_secret}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "API Secret 已更新"
-  fi
-
+  ok "API Secret 已更新"
   pause_enter
 }
 
-set_clash_api_ui_dir() {
-  require_clash_api_env || return 1
+set_clash_api_controller() {
+  load_clash_api_current
+  local controller
+  controller="$(prompt_default "请输入监听地址 host:port" "${CLASH_API_CONTROLLER:-127.0.0.1:9090}")"
 
-  local current ui_dir tmp_file
-  current="$(get_clash_api_field "external_ui")"
-  read -r -p "请输入 external_ui 目录，留空表示清空 [当前: ${current:-<空>}] : " ui_dir
-
-  tmp_file="${TMP_DIR}/config.clash-api.ui.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$ui_dir" <<'PY'
-import json, sys
-
-path, ui_dir = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-clash["external_ui"] = ui_dir
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "设置 external_ui 失败"
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${controller}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_SECRET:-$(gen_api_secret)}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    if [ -n "${ui_dir}" ]; then
-      ok "external_ui 已更新为：${ui_dir}"
-    else
-      ok "external_ui 已清空"
-    fi
-  fi
-
+  ok "监听地址已更新"
   pause_enter
 }
 
-enable_default_ui_download() {
-  require_clash_api_env || return 1
+set_clash_api_default_mode() {
+  load_clash_api_current
+  local choice mode
 
-  local prep controller secret current_ui current_detour ui_dir detour tmp_file
-  prep="$(prepare_controller_and_secret)"
-  controller="${prep%%|*}"
-  secret="${prep##*|}"
+  echo "请选择默认模式："
+  echo "1. Rule"
+  echo "2. Global"
+  echo "3. Direct"
+  read -r -p "请选择 [1-3]（默认 1）: " choice
+  case "${choice:-1}" in
+    1) mode="Rule" ;;
+    2) mode="Global" ;;
+    3) mode="Direct" ;;
+    *) mode="Rule" ;;
+  esac
 
-  current_ui="$(get_clash_api_field "external_ui")"
-  current_detour="$(get_clash_api_field "external_ui_download_detour")"
-
-  ui_dir="$(prompt_default "请输入 external_ui 目录" "${current_ui:-dashboard}")"
-  read -r -p "请输入 external_ui_download_detour，留空表示默认出站 [当前: ${current_detour:-<空>}] : " detour
-
-  tmp_file="${TMP_DIR}/config.clash-api.default-ui.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$controller" "$secret" "$ui_dir" "$detour" <<'PY'
-import json, sys
-
-path, controller, secret, ui_dir, detour = sys.argv[1:]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-
-clash["external_controller"] = controller
-clash["external_ui"] = ui_dir
-clash["external_ui_download_url"] = ""
-clash["external_ui_download_detour"] = detour
-
-if secret:
-    clash["secret"] = secret
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "启用默认 UI 自动下载失败"
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_SECRET:-$(gen_api_secret)}" \
+    "${mode}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
     pause_enter
     return 1
   fi
 
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "默认 UI 自动下载已启用"
+  ok "默认模式已更新为 ${mode}"
+  pause_enter
+}
+
+set_clash_api_ui_detour() {
+  load_clash_api_current
+  local detour
+  detour="$(prompt_default "请输入 UI 下载出口 tag（留空走默认出口）" "${CLASH_API_UI_DETOUR}")"
+
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${detour}" \
+    "${CLASH_API_SECRET:-$(gen_api_secret)}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
+    pause_enter
+    return 1
+  fi
+
+  ok "UI 下载出口已更新"
+  pause_enter
+}
+
+set_clash_api_cors_origin() {
+  load_clash_api_current
+  local origin
+  origin="$(prompt_default "请输入 CORS 允许来源（多个用英文逗号分隔，留空为 *）" "${CLASH_API_ALLOW_ORIGIN}")"
+
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_SECRET:-$(gen_api_secret)}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${origin}" \
+    "${CLASH_API_ALLOW_PRIVATE:-false}"; then
+    pause_enter
+    return 1
+  fi
+
+  ok "CORS 允许来源已更新"
+  pause_enter
+}
+
+set_clash_api_allow_private_network() {
+  load_clash_api_current
+  local allow_private="false"
+
+  if confirm_default_no "允许来自私有网络的访问吗？"; then
+    allow_private="true"
+  fi
+
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${CLASH_API_CONTROLLER:-127.0.0.1:9090}" \
+    "${CLASH_API_UI_DIR:-dashboard}" \
+    "${CLASH_API_UI_URL}" \
+    "${CLASH_API_UI_DETOUR}" \
+    "${CLASH_API_SECRET:-$(gen_api_secret)}" \
+    "${CLASH_API_DEFAULT_MODE:-Rule}" \
+    "${CLASH_API_ALLOW_ORIGIN}" \
+    "${allow_private}"; then
+    pause_enter
+    return 1
+  fi
+
+  ok "私网访问设置已更新"
+  pause_enter
+}
+
+restore_clash_api_defaults() {
+  load_clash_api_current
+  local controller secret
+
+  controller="${CLASH_API_CONTROLLER:-127.0.0.1:9090}"
+  secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
+
+  if ! confirm_default_yes "确认恢复 Clash API 推荐默认值吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  if ! apply_clash_api_settings \
+    "enable" \
+    "${controller}" \
+    "dashboard" \
+    "" \
+    "" \
+    "${secret}" \
+    "Rule" \
+    "" \
+    "false"; then
+    pause_enter
+    return 1
+  fi
+
+  ok "已恢复推荐默认值"
+  pause_enter
+}
+
+menu_clash_api_advanced() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "           Clash API 高级设置"
+    echo "======================================"
+    echo "1. 设置监听地址"
+    echo "2. 设置默认模式"
+    echo "3. 设置 UI 下载出口"
+    echo "4. 设置 CORS 允许来源"
+    echo "5. 设置允许私网访问"
+    echo "6. 恢复推荐默认值"
+    echo "0. 返回"
     echo
-    echo "首次访问时，如 ${ui_dir} 目录为空，sing-box 会自动下载默认 Yacd-meta UI。"
-  fi
 
-  pause_enter
-}
-
-set_custom_ui_download_url() {
-  require_clash_api_env || return 1
-
-  local prep controller secret current_ui current_url current_detour ui_dir download_url detour tmp_file
-  prep="$(prepare_controller_and_secret)"
-  controller="${prep%%|*}"
-  secret="${prep##*|}"
-
-  current_ui="$(get_clash_api_field "external_ui")"
-  current_url="$(get_clash_api_field "external_ui_download_url")"
-  current_detour="$(get_clash_api_field "external_ui_download_detour")"
-
-  ui_dir="$(prompt_default "请输入 external_ui 目录" "${current_ui:-dashboard}")"
-  download_url="$(prompt_default "请输入 external_ui_download_url" "${current_url:-}")"
-  read -r -p "请输入 external_ui_download_detour，留空表示默认出站 [当前: ${current_detour:-<空>}] : " detour
-
-  tmp_file="${TMP_DIR}/config.clash-api.custom-ui-url.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$controller" "$secret" "$ui_dir" "$download_url" "$detour" <<'PY'
-import json, sys
-
-path, controller, secret, ui_dir, download_url, detour = sys.argv[1:]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-
-clash["external_controller"] = controller
-clash["external_ui"] = ui_dir
-clash["external_ui_download_url"] = download_url
-clash["external_ui_download_detour"] = detour
-
-if secret:
-    clash["secret"] = secret
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "设置自定义 UI 下载地址失败"
-    pause_enter
-    return 1
-  fi
-
-  if apply_clash_api_config "${tmp_file}"; then
-    ok "自定义 UI 下载地址已更新"
-  fi
-
-  pause_enter
-}
-
-set_ui_download_detour() {
-  require_clash_api_env || return 1
-
-  local current detour tmp_file
-  current="$(get_clash_api_field "external_ui_download_detour")"
-  read -r -p "请输入 external_ui_download_detour，留空表示默认出站 [当前: ${current:-<空>}] : " detour
-
-  tmp_file="${TMP_DIR}/config.clash-api.ui-detour.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" "$detour" <<'PY'
-import json, sys
-
-path, detour = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-exp = cfg.setdefault("experimental", {})
-clash = exp.setdefault("clash_api", {})
-clash["external_ui_download_detour"] = detour
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "设置 UI 下载出口失败"
-    pause_enter
-    return 1
-  fi
-
-  if apply_clash_api_config "${tmp_file}"; then
-    if [ -n "${detour}" ]; then
-      ok "UI 下载出口已更新为：${detour}"
-    else
-      ok "UI 下载出口已清空，改为默认出站"
-    fi
-  fi
-
-  pause_enter
+    read -r -p "请选择 [0-6]: " choice
+    case "${choice:-}" in
+      1) set_clash_api_controller ;;
+      2) set_clash_api_default_mode ;;
+      3) set_clash_api_ui_detour ;;
+      4) set_clash_api_cors_origin ;;
+      5) set_clash_api_allow_private_network ;;
+      6) restore_clash_api_defaults ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
 }
 
 menu_clash_api_management() {
@@ -465,29 +647,25 @@ menu_clash_api_management() {
     echo "======================================"
     echo "           Clash API 管理"
     echo "======================================"
-    echo "1. 开启 Clash API"
-    echo "2. 关闭 Clash API"
-    echo "3. 查看 Clash API 状态"
-    echo "4. 设置监听地址"
-    echo "5. 设置 API Secret"
-    echo "6. 设置外部 UI 目录"
-    echo "7. 启用默认 UI 自动下载"
-    echo "8. 设置自定义 UI 下载地址"
-    echo "9. 设置 UI 下载出口"
+    echo "1. 一键启用本机面板"
+    echo "2. 一键启用公网面板"
+    echo "3. 关闭 Clash API"
+    echo "4. 查看当前状态"
+    echo "5. 更换面板 UI"
+    echo "6. 设置 API Secret"
+    echo "7. 高级设置"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-9]: " choice
+    read -r -p "请选择 [0-7]: " choice
     case "${choice:-}" in
-      1) enable_clash_api ;;
-      2) disable_clash_api ;;
-      3) show_clash_api_status ;;
-      4) set_clash_api_controller ;;
-      5) set_clash_api_secret ;;
-      6) set_clash_api_ui_dir ;;
-      7) enable_default_ui_download ;;
-      8) set_custom_ui_download_url ;;
-      9) set_ui_download_detour ;;
+      1) enable_clash_api_preset "local" ;;
+      2) enable_clash_api_preset "public" ;;
+      3) disable_clash_api ;;
+      4) show_clash_api_status ;;
+      5) change_clash_api_ui ;;
+      6) set_clash_api_secret ;;
+      7) menu_clash_api_advanced ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
