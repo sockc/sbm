@@ -525,27 +525,27 @@ new_outbounds = preserved + imported
 if all_candidate_tags:
     new_outbounds.append({
         "type": "urltest",
-        "tag": "auto",
+        "tag": "自动选择",
         "outbounds": all_candidate_tags,
         "interrupt_exist_connections": False
     })
 
-    selector_members = ["direct", "auto"] + all_candidate_tags
-    selector_default = "auto"
+    selector_members = ["direct", "自动选择"] + all_candidate_tags
+    selector_default = "自动选择"
 else:
     selector_members = ["direct"]
     selector_default = "direct"
 
 new_outbounds.append({
     "type": "selector",
-    "tag": "proxy",
+    "tag": "手动切换",
     "outbounds": selector_members,
     "default": selector_default,
     "interrupt_exist_connections": False
 })
 
 cfg["outbounds"] = new_outbounds
-cfg.setdefault("route", {})["final"] = "proxy"
+cfg.setdefault("route", {})["final"] = "手动切换"
 
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -696,20 +696,20 @@ print("----------------------------------------------------------------")
 selector = None
 urltest = None
 for ob in outbounds:
-    if ob.get("tag") == "proxy" and ob.get("type") == "selector":
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
         selector = ob
-    if ob.get("tag") == "auto" and ob.get("type") == "urltest":
+    if ob.get("tag") == "自动选择" and ob.get("type") == "urltest":
         urltest = ob
 
 route_final = cfg.get("route", {}).get("final", "")
 print(f"route.final : {route_final or '<空>'}")
 if selector:
-    print(f"selector    : {', '.join(selector.get('outbounds', []))}")
-    print(f"default     : {selector.get('default', '')}")
+    print(f"手动切换    : {', '.join(selector.get('outbounds', []))}")
+    print(f"默认节点     : {selector.get('default', '')}")
 else:
     print("selector    : <未找到>")
 if urltest:
-    print(f"urltest     : {', '.join(urltest.get('outbounds', []))}")
+    print(f"自动选择     : {', '.join(urltest.get('outbounds', []))}")
 else:
     print("urltest     : <未找到>")
 PY
@@ -731,6 +731,14 @@ secret = clash.get("secret", "")
 
 print(controller)
 print(secret)
+PY
+}
+
+urlencode_text() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe=''))
 PY
 }
 
@@ -796,7 +804,7 @@ cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 selector = None
 
 for ob in cfg.get("outbounds", []):
-    if ob.get("tag") == "proxy" and ob.get("type") == "selector":
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
         selector = ob
         break
 
@@ -824,7 +832,7 @@ idx = int(sys.argv[2])
 
 selector = None
 for ob in cfg.get("outbounds", []):
-    if ob.get("tag") == "proxy" and ob.get("type") == "selector":
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
         selector = ob
         break
 
@@ -954,9 +962,9 @@ menu_outbound_management() {
     echo "7. 应用指定节点源到当前策略组"
     echo "8. 应用全部节点源到当前策略组"
     echo "9. 查看当前已应用节点"
-    echo "10. 查看当前 proxy 选择"
-    echo "11. 切换 proxy 到指定节点"
-    echo "12. 查看可切换节点列表"
+    echo "10. 查看当前手动切换组选择"
+    echo "11. 切换手动切换组到指定节点"
+    echo "12. 查看手动切换组可选节点"
     echo "13. 删除节点源"
     echo "0. 返回"
     echo
