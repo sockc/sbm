@@ -1050,6 +1050,266 @@ menu_deploy_vmess() {
   deploy_vmess
 }
 
+save_tuic_meta() {
+  local connect_host="$1"
+  local listen_port="$2"
+  local user_name="$3"
+  local uuid="$4"
+  local password="$5"
+  local server_name="$6"
+  local congestion_control="$7"
+  local zero_rtt_handshake="$8"
+  local heartbeat="$9"
+  local cert_mode="${10}"
+
+  cat > "${BASE_DIR}/tuic-meta.json" <<JSON
+{
+  "connect_host": "${connect_host}",
+  "listen_port": ${listen_port},
+  "user_name": "${user_name}",
+  "uuid": "${uuid}",
+  "password": "${password}",
+  "server_name": "${server_name}",
+  "congestion_control": "${congestion_control}",
+  "zero_rtt_handshake": "${zero_rtt_handshake}",
+  "heartbeat": "${heartbeat}",
+  "cert_mode": "${cert_mode}"
+}
+JSON
+
+  chmod 600 "${BASE_DIR}/tuic-meta.json" 2>/dev/null || true
+}
+
+deploy_tuic() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+
+  local listen_addr listen_port user_name uuid password
+  local connect_host server_name cert_path key_path cert_mode
+  local congestion_control zero_rtt_choice zero_rtt_handshake
+  local heartbeat default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入 TUIC 监听端口" "443")"
+  user_name="$(prompt_default "请输入 TUIC 用户备注" "tuic-user1")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  echo "请选择 congestion_control："
+  echo "1. cubic"
+  echo "2. new_reno"
+  echo "3. bbr"
+  read -r -p "请选择 [1-3]（默认 1）: " congestion_control
+  case "${congestion_control:-1}" in
+    1) congestion_control="cubic" ;;
+    2) congestion_control="new_reno" ;;
+    3) congestion_control="bbr" ;;
+    *) congestion_control="cubic" ;;
+  esac
+
+  echo
+  echo "是否开启 zero_rtt_handshake："
+  echo "1. 关闭（推荐）"
+  echo "2. 开启"
+  read -r -p "请选择 [1-2]（默认 1）: " zero_rtt_choice
+  case "${zero_rtt_choice:-1}" in
+    1) zero_rtt_handshake="false" ;;
+    2) zero_rtt_handshake="true" ;;
+    *) zero_rtt_handshake="false" ;;
+  esac
+
+  heartbeat="$(prompt_default "请输入 heartbeat（默认 10s）" "10s")"
+
+  echo
+  echo "========== TUIC 配置预览 =========="
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "SNI            : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "congestion     : ${congestion_control}"
+  echo "zero_rtt       : ${zero_rtt_handshake}"
+  echo "heartbeat      : ${heartbeat}"
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.tuic.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
+    "${cert_path}" "${key_path}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" <<'PY'
+import json, sys
+
+(
+    path_cfg, listen_addr, listen_port, user_name, uuid, password,
+    cert_path, key_path, congestion_control, zero_rtt_handshake, heartbeat
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+tuic_obj = {
+    "type": "tuic",
+    "tag": "tuic-in",
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "password": password
+        }
+    ],
+    "congestion_control": congestion_control,
+    "zero_rtt_handshake": (zero_rtt_handshake == "true"),
+    "heartbeat": heartbeat,
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == "tuic-in":
+        inbounds[i] = tuic_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(tuic_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 TUIC 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_tuic_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
+
+  ok "TUIC 部署完成"
+  echo
+  echo "------ TUIC 客户端关键参数 ------"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "congestion  : ${congestion_control}"
+  echo "zero_rtt    : ${zero_rtt_handshake}"
+  echo "heartbeat   : ${heartbeat}"
+  echo "--------------------------------"
+  echo
+
+  if [ "${zero_rtt_handshake}" = "true" ]; then
+    echo "警告：zero_rtt_handshake 已开启，存在重放攻击风险，不推荐长期使用。"
+    echo
+  fi
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_tuic() {
+  deploy_tuic
+}
+
 menu_inbound_management() {
   while true; do
     clear
@@ -1059,16 +1319,18 @@ menu_inbound_management() {
     echo "1. 部署/重装 VLESS + Reality"
     echo "2. 部署/重装 Hysteria2"
     echo "3. 部署/重装 VMess"
-    echo "4. 查看当前入站"
+    echo "4. 部署/重装 TUIC"
+    echo "5. 查看当前入站"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-4]: " choice
+    read -r -p "请选择 [0-5]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless_reality ;;
       2) menu_deploy_hysteria2 ;;
       3) menu_deploy_vmess ;;
-      4) show_current_inbounds ;;
+      4) menu_deploy_tuic ;;
+      5) show_current_inbounds ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
