@@ -637,18 +637,25 @@ PY
 }
 
 save_hy2_meta() {
-  local connect_host="$1"
-  local listen_port="$2"
-  local user_name="$3"
-  local password="$4"
-  local server_name="$5"
-  local obfs_password="$6"
-  local up_mbps="$7"
-  local down_mbps="$8"
-  local cert_mode="$9"
+  local hy2_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local password="$5"
+  local server_name="$6"
+  local obfs_password="$7"
+  local up_mbps="$8"
+  local down_mbps="$9"
+  local cert_mode="${10}"
 
-  cat > "${BASE_DIR}/hy2-meta.json" <<JSON
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${hy2_tag}")"
+
+  cat > "${meta_file}" <<JSON
 {
+  "protocol": "hysteria2",
+  "tag": "${hy2_tag}",
   "connect_host": "${connect_host}",
   "listen_port": ${listen_port},
   "user_name": "${user_name}",
@@ -661,7 +668,7 @@ save_hy2_meta() {
 }
 JSON
 
-  chmod 600 "${BASE_DIR}/hy2-meta.json" 2>/dev/null || true
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 deploy_hysteria2() {
