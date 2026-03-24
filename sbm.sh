@@ -158,7 +158,7 @@ main_menu() {
     echo "4.  导出URI"
     echo "5.  出站管理"
     echo "6.  面板管理"
-    echo "7.  模板管理"
+    echo "7.  分流模板"
     echo "8.  防火墙管理"
     echo "9.  备份与恢复"
     echo "10. 服务状态"
