@@ -152,17 +152,17 @@ show_service_status() {
 main_menu() {
   while true; do
     show_header
-    echo "1. 安装/升级 sing-box 内核"
+    echo "1. 安装/升级"
     echo "2. 入站管理"
     echo "3. 用户管理"
-    echo "4. 导出客户端 URI"
+    echo "4. 导出URI"
     echo "5. 出站管理"
-    echo "6. 防火墙管理"
-    echo "7. 备份与恢复"
-    echo "8. 脚本自更新"
-    echo "9. Clash API 管理"
-    echo "10. 模板管理"
-    echo "11. 服务状态"
+    echo "6. 面板管理"
+    echo "7. 模板管理"
+    echo "8. 防火墙管理"
+    echo "9. 备份与恢复"
+    echo "10. 服务状态"
+    echo "11. 脚本自更新"
     echo "0. 退出"
     echo
 
@@ -173,12 +173,12 @@ main_menu() {
       3) menu_user_management ;;
       4) menu_export_client ;;
       5) menu_outbound_management ;;
-      6) menu_firewall_management ;;
-      7) menu_backup_management ;;
-      8) menu_self_update ;;
-      9) menu_clash_api_management ;;
-      10) menu_template_management ;;
-      11) show_service_status; pause_enter ;;
+      6) menu_clash_api_management ;;
+      7) menu_template_management ;;
+      8) menu_firewall_management ;;
+      9) menu_backup_management ;;
+      10) show_service_status; pause_enter ;;
+      11) menu_self_update ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
