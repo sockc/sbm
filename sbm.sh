@@ -93,15 +93,19 @@ status_color() {
 }
 
 ui_status_color() {
-  case "${1:-}" in
-    已启用) printf "%s" "${C_BGREEN}" ;;
-    已启用（无 UI）) printf "%s" "${C_BYELLOW}" ;;
-    配置异常) printf "%s" "${C_BRED}" ;;
-    未启用|"<空>") printf "%s" "${C_YELLOW}" ;;
-    *)
-      printf "%s" "${C_BCYAN}"
-      ;;
-  esac
+  local s="${1:-}"
+
+  if [ "${s}" = "已启用" ]; then
+    printf "%s" "${C_BGREEN}"
+  elif [ "${s}" = "已启用（无 UI）" ]; then
+    printf "%s" "${C_BYELLOW}"
+  elif [ "${s}" = "配置异常" ]; then
+    printf "%s" "${C_BRED}"
+  elif [ "${s}" = "未启用" ] || [ "${s}" = "<空>" ]; then
+    printf "%s" "${C_YELLOW}"
+  else
+    printf "%s" "${C_BCYAN}"
+  fi
 }
 
 menu_item() {
