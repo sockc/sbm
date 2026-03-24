@@ -282,6 +282,261 @@ export_hy2_singbox_json() {
   pause_enter
 }
 
+require_vmess_meta_file() {
+  local vmess_meta="${BASE_DIR}/vmess-meta.json"
+  if [ ! -f "${vmess_meta}" ]; then
+    err "未找到 ${vmess_meta}，请先部署 VMess"
+    return 1
+  fi
+}
+
+build_vmess_uri() {
+  local vmess_meta="${BASE_DIR}/vmess-meta.json"
+
+  python3 - "${vmess_meta}" <<'PY'
+import base64, json, sys
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+transport_type = str(meta.get("transport_type", "ws"))
+tls_enabled = str(meta.get("tls_enabled", "false"))
+server_name = str(meta.get("server_name", "") or "")
+host = str(meta.get("host", "") or "")
+path = str(meta.get("path", "/") or "/")
+
+obj = {
+    "v": "2",
+    "ps": str(meta.get("user_name", "vmess")),
+    "add": str(meta["connect_host"]),
+    "port": str(meta["listen_port"]),
+    "id": str(meta["uuid"]),
+    "aid": "0",
+    "scy": "auto",
+    "net": transport_type,
+    "type": "none",
+    "host": host,
+    "path": path,
+    "tls": "tls" if tls_enabled == "true" else "",
+    "sni": server_name if tls_enabled == "true" else ""
+}
+
+raw = json.dumps(obj, ensure_ascii=False, separators=(',', ':')).encode()
+print("vmess://" + base64.b64encode(raw).decode())
+PY
+}
+
+build_vmess_singbox_json() {
+  local vmess_meta="${BASE_DIR}/vmess-meta.json"
+
+  python3 - "${vmess_meta}" <<'PY'
+import json, sys
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+transport_type = str(meta.get("transport_type", "ws"))
+tls_enabled = str(meta.get("tls_enabled", "false"))
+server_name = str(meta.get("server_name", "") or "")
+host = str(meta.get("host", "") or "")
+path = str(meta.get("path", "/") or "/")
+method = str(meta.get("method", "GET") or "GET")
+cert_mode = str(meta.get("cert_mode", "0"))
+
+outbound = {
+    "type": "vmess",
+    "tag": "vmess-out",
+    "server": str(meta["connect_host"]),
+    "server_port": int(meta["listen_port"]),
+    "uuid": str(meta["uuid"]),
+    "security": "auto",
+    "alter_id": 0
+}
+
+if transport_type == "http":
+    transport = {
+        "type": "http",
+        "path": path,
+        "method": method
+    }
+    if host:
+        transport["host"] = [host]
+else:
+    transport = {
+        "type": "ws",
+        "path": path
+    }
+    if host:
+        transport["headers"] = {"Host": host}
+
+outbound["transport"] = transport
+
+if tls_enabled == "true":
+    tls = {
+        "enabled": True,
+        "server_name": server_name
+    }
+    if cert_mode == "2":
+        tls["insecure"] = True
+    outbound["tls"] = tls
+
+print(json.dumps({"outbounds": [outbound]}, ensure_ascii=False, indent=2))
+PY
+}
+
+export_vmess_uri() {
+  require_vmess_meta_file || { pause_enter; return 1; }
+
+  local uri
+  uri="$(build_vmess_uri)" || {
+    err "生成 VMess URI 失败"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "------ VMess URI ------"
+  echo "${uri}"
+  echo "-----------------------"
+  echo
+  echo "说明：这是常见兼容格式的 vmess:// 链接；不同客户端对 VMess 分享链接的兼容并不完全统一。"
+  echo
+
+  pause_enter
+}
+
+export_vmess_singbox_json() {
+  require_vmess_meta_file || { pause_enter; return 1; }
+
+  echo
+  echo "------ VMess sing-box 客户端 JSON ------"
+  build_vmess_singbox_json || {
+    err "生成 VMess 客户端 JSON 失败"
+    pause_enter
+    return 1
+  }
+  echo
+  echo "----------------------------------------"
+  echo
+
+  pause_enter
+}
+
+require_tuic_meta_file() {
+  local tuic_meta="${BASE_DIR}/tuic-meta.json"
+  if [ ! -f "${tuic_meta}" ]; then
+    err "未找到 ${tuic_meta}，请先部署 TUIC"
+    return 1
+  fi
+}
+
+build_tuic_uri() {
+  local tuic_meta="${BASE_DIR}/tuic-meta.json"
+
+  python3 - "${tuic_meta}" <<'PY'
+import json, sys
+from urllib.parse import quote, urlencode
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+host = str(meta["connect_host"])
+port = int(meta["listen_port"])
+uuid = str(meta["uuid"])
+password = str(meta["password"])
+sni = str(meta["server_name"])
+congestion_control = str(meta.get("congestion_control", "cubic") or "cubic")
+cert_mode = str(meta.get("cert_mode", "1"))
+
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
+
+params = {
+    "sni": sni,
+    "congestion_control": congestion_control,
+    "udp_relay_mode": "native"
+}
+
+if cert_mode == "2":
+    params["allow_insecure"] = "1"
+
+userinfo = f"{quote(uuid, safe='')}:{quote(password, safe='')}"
+name = quote(str(meta.get("user_name", "tuic")), safe='')
+query = urlencode(params)
+print(f"tuic://{userinfo}@{host}:{port}?{query}#{name}")
+PY
+}
+
+build_tuic_singbox_json() {
+  local tuic_meta="${BASE_DIR}/tuic-meta.json"
+
+  python3 - "${tuic_meta}" <<'PY'
+import json, sys
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+cert_mode = str(meta.get("cert_mode", "1"))
+zero_rtt = str(meta.get("zero_rtt_handshake", "false")).lower() == "true"
+
+outbound = {
+    "type": "tuic",
+    "tag": "tuic-out",
+    "server": str(meta["connect_host"]),
+    "server_port": int(meta["listen_port"]),
+    "uuid": str(meta["uuid"]),
+    "password": str(meta["password"]),
+    "congestion_control": str(meta.get("congestion_control", "cubic") or "cubic"),
+    "udp_relay_mode": "native",
+    "zero_rtt_handshake": zero_rtt,
+    "heartbeat": str(meta.get("heartbeat", "10s") or "10s"),
+    "tls": {
+        "enabled": True,
+        "server_name": str(meta["server_name"])
+    }
+}
+
+if cert_mode == "2":
+    outbound["tls"]["insecure"] = True
+
+print(json.dumps({"outbounds": [outbound]}, ensure_ascii=False, indent=2))
+PY
+}
+
+export_tuic_uri() {
+  require_tuic_meta_file || { pause_enter; return 1; }
+
+  local uri
+  uri="$(build_tuic_uri)" || {
+    err "生成 TUIC URI 失败"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "------ TUIC URI ------"
+  echo "${uri}"
+  echo "----------------------"
+  echo
+  echo "说明：TUIC 分享链接在不同客户端之间兼容性不完全一致；下方的 sing-box JSON 更稳。"
+  echo
+
+  pause_enter
+}
+
+export_tuic_singbox_json() {
+  require_tuic_meta_file || { pause_enter; return 1; }
+
+  echo
+  echo "------ TUIC sing-box 客户端 JSON ------"
+  build_tuic_singbox_json || {
+    err "生成 TUIC 客户端 JSON 失败"
+    pause_enter
+    return 1
+  }
+  echo
+  echo "---------------------------------------"
+  echo
+
+  pause_enter
+}
+
 menu_export_client() {
   while true; do
     clear
