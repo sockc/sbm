@@ -421,6 +421,31 @@ inbound_meta_file_by_tag() {
   printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${name}"
 }
 
+next_inbound_tag_by_prefix() {
+  local prefix="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${prefix}" <<'PY'
+import json, os, re, sys
+
+cfg_path, prefix = sys.argv[1], sys.argv[2]
+nums = []
+
+if os.path.exists(cfg_path):
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+    for ib in cfg.get("inbounds", []):
+        tag = str(ib.get("tag", ""))
+        m = re.fullmatch(re.escape(prefix) + r"-(\d{3})", tag)
+        if m:
+            nums.append(int(m.group(1)))
+
+n = 1
+while n in nums:
+    n += 1
+
+print(f"{prefix}-{n:03d}")
+PY
+}
+
 show_current_inbounds() {
   require_config_file || {
     pause_enter
@@ -898,20 +923,27 @@ PY
 }
 
 save_vmess_meta() {
-  local connect_host="$1"
-  local listen_port="$2"
-  local user_name="$3"
-  local uuid="$4"
-  local transport_type="$5"
-  local tls_enabled="$6"
-  local server_name="$7"
-  local path="$8"
-  local host="$9"
-  local method="${10}"
-  local cert_mode="${11}"
+  local vmess_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local transport_type="$6"
+  local tls_enabled="$7"
+  local server_name="$8"
+  local path="$9"
+  local host="${10}"
+  local method="${11}"
+  local cert_mode="${12}"
 
-  cat > "${BASE_DIR}/vmess-meta.json" <<JSON
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${vmess_tag}")"
+
+  cat > "${meta_file}" <<JSON
 {
+  "protocol": "vmess",
+  "tag": "${vmess_tag}",
   "connect_host": "${connect_host}",
   "listen_port": ${listen_port},
   "user_name": "${user_name}",
@@ -926,7 +958,7 @@ save_vmess_meta() {
 }
 JSON
 
-  chmod 600 "${BASE_DIR}/vmess-meta.json" 2>/dev/null || true
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 deploy_vmess() {
@@ -941,9 +973,9 @@ deploy_vmess() {
   mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
 
   local transport_choice transport_type tls_choice tls_enabled cert_mode
-  local listen_addr listen_port user_name uuid
+  local listen_addr listen_port user_name uuid vmess_tag
   local connect_host server_name cert_path key_path
-  local path host method default_host tmp_file backend cert_pair
+  local path host method default_host tmp_file backend cert_pair default_tag_prefix
 
   default_host="$(detect_connect_host)"
   [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
@@ -956,10 +988,22 @@ deploy_vmess() {
   transport_choice="${transport_choice:-2}"
 
   case "${transport_choice}" in
-    1) transport_type="http" ;;
-    2) transport_type="ws" ;;
-    *) err "无效选项"; pause_enter; return 1 ;;
+    1)
+      transport_type="http"
+      default_tag_prefix="vmess-http"
+      ;;
+    2)
+      transport_type="ws"
+      default_tag_prefix="vmess-ws"
+      ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
   esac
+
+  vmess_tag="$(prompt_default "请输入 VMess 实例标签" "$(next_inbound_tag_by_prefix "${default_tag_prefix}")")"
 
   echo
   echo "是否启用 TLS："
@@ -971,7 +1015,11 @@ deploy_vmess() {
   case "${tls_choice}" in
     1) tls_enabled="true" ;;
     2) tls_enabled="false" ;;
-    *) err "无效选项"; pause_enter; return 1 ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
   esac
 
   listen_addr="$(prompt_listen_addr)"
@@ -985,7 +1033,7 @@ deploy_vmess() {
     fi
   fi
 
-  user_name="$(prompt_default "请输入 VMess 用户备注" "vmess-user1")"
+  user_name="$(prompt_default "请输入 VMess 用户备注" "${vmess_tag}")"
   uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
 
@@ -1047,6 +1095,7 @@ deploy_vmess() {
 
   echo
   echo "========== VMess 配置预览 =========="
+  echo "实例标签       : ${vmess_tag}"
   echo "传输方式       : ${transport_type}"
   echo "TLS            : ${tls_enabled}"
   echo "监听地址       : ${listen_addr}"
@@ -1085,13 +1134,13 @@ deploy_vmess() {
   cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
   if ! python3 - "${tmp_file}" \
-    "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
+    "${vmess_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
     "${transport_type}" "${path}" "${host}" "${method}" \
     "${tls_enabled}" "${server_name}" "${cert_path}" "${key_path}" <<'PY'
 import json, sys
 
 (
-    path_cfg, listen_addr, listen_port, user_name, uuid,
+    path_cfg, vmess_tag, listen_addr, listen_port, user_name, uuid,
     transport_type, req_path, host, method,
     tls_enabled, server_name, cert_path, key_path
 ) = sys.argv[1:]
@@ -1101,7 +1150,7 @@ inbounds = cfg.setdefault("inbounds", [])
 
 vmess_obj = {
     "type": "vmess",
-    "tag": "vmess-in",
+    "tag": vmess_tag,
     "listen": listen_addr,
     "listen_port": int(listen_port),
     "users": [
@@ -1143,7 +1192,7 @@ if tls_enabled == "true":
 
 replaced = False
 for i, ib in enumerate(inbounds):
-    if ib.get("tag") == "vmess-in":
+    if ib.get("tag") == vmess_tag:
         inbounds[i] = vmess_obj
         replaced = True
         break
@@ -1174,11 +1223,12 @@ PY
     return 1
   fi
 
-  save_vmess_meta "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
-  
+  save_vmess_meta "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
+
   ok "VMess 部署完成"
   echo
   echo "------ VMess 客户端关键参数 ------"
+  echo "实例标签    : ${vmess_tag}"
   echo "地址        : ${connect_host}"
   echo "端口        : ${listen_port}"
   echo "UUID        : ${uuid}"
