@@ -401,6 +401,7 @@ save_hy2_meta() {
   "user_name": "${user_name}",
   "password": "${password}",
   "server_name": "${server_name}",
+  "cert_mode": "${cert_mode}",
   "obfs_password": "${obfs_password}",
   "up_mbps": ${up_mbps},
   "down_mbps": ${down_mbps}
