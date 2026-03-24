@@ -851,10 +851,11 @@ show_current_proxy_selection() {
     return 1
   fi
 
-  python3 - <<'PY' <<<"${resp}"
-import json, sys
+  RESP_JSON="${resp}" python3 - <<'PY'
+import json
+import os
 
-data = json.load(sys.stdin)
+data = json.loads(os.environ["RESP_JSON"])
 print("当前 proxy selector 状态：")
 print(f"name   : {data.get('name', '<空>')}")
 print(f"type   : {data.get('type', '<空>')}")
