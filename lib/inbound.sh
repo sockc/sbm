@@ -671,7 +671,8 @@ PY
   echo "证书模式    : 自签证书"
   echo "客户端建议  :"
   echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
-  echo "  2. 更省事：在客户端 tls.insecure = true"
+  echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
+  echo "自签证书路径: ${cert_path}"
   else
   echo "证书模式    : 正式证书"
   echo "客户端建议  : 正常校验证书即可"
