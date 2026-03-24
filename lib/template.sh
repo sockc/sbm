@@ -430,21 +430,13 @@ if direct_suffix:
         "outbound": "direct"
     })
 
-cn_proxy_suffix = rules_cfg.get("cn_proxy_domain_suffix", [])
-if cn_proxy_suffix:
-    rules.append({
-        "domain_suffix": cn_proxy_suffix,
-        "action": "route",
-        "outbound": "cn-proxy"
-    })
-
-proxy_suffix = rules_cfg.get("proxy_domain_suffix", [])
-if proxy_suffix:
-    rules.append({
-        "domain_suffix": proxy_suffix,
-        "action": "route",
-        "outbound": "proxy"
-    })
+for outbound_tag, suffixes in rules_cfg.get("route_groups", {}).items():
+    if suffixes:
+        rules.append({
+            "domain_suffix": suffixes,
+            "action": "route",
+            "outbound": outbound_tag
+        })
 
 route["rules"] = rules
 route["final"] = rules_cfg.get("final", "proxy")
