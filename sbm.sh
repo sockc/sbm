@@ -34,6 +34,7 @@ show_header() {
   echo "推荐内核: ${DEFAULT_SINGBOX_VERSION}"
   echo "配置目录: ${CONFIG_DIR}"
   echo "--------------------------------------"
+  ss -lntup 2>/dev/null | grep -E 'sing-box|:9066|:9090|:443|:8443' || true
   if command -v sing-box >/dev/null 2>&1; then
     echo "sing-box: 已安装 ($(sing-box version 2>/dev/null | head -n1 || echo unknown))"
   else
