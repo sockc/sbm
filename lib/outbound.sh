@@ -438,9 +438,9 @@ def is_generated_node(ob):
     return re.fullmatch(r"node-\d+", tag or "") is not None
 
 def is_generated_group(ob):
-    tag = ob.get("tag", "")
     typ = ob.get("type", "")
-    return (tag == "auto" and typ == "urltest") or (tag == "proxy" and typ == "selector")
+    # 只要是策略组类出站，都在“应用节点到当前策略组”时重建
+    return typ in ("selector", "urltest")
 
 preserved = []
 existing_remote_tags = []
