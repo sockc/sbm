@@ -423,7 +423,7 @@ deploy_hysteria2() {
   local listen_addr listen_port user_name password
   local cert_path key_path connect_host server_name
   local up_mbps down_mbps obfs_password use_obfs
-  local default_host tmp_file backend
+  local cert_mode default_host tmp_file backend
 
   default_host="$(detect_connect_host)"
   [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
