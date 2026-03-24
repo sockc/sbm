@@ -286,16 +286,21 @@ print(f"当前模板        : {template_name}")
 print(f"route.final     : {final or '<空>'}")
 
 if selector:
-    print(f"selector 默认   : {selector.get('default', '<空>')}")
-    print(f"selector 成员   : {', '.join(selector.get('outbounds', [])) or '<空>'}")
+    print(f"手动切换 默认   : {selector.get('default', '<空>')}")
+    print(f"手动切换 成员   : {', '.join(selector.get('outbounds', [])) or '<空>'}")
 else:
-    print("selector 状态   : 未找到 tag=proxy 的 selector")
+    print("手动切换 状态   : 未找到")
+
+if auto_selector:
+    print(f"自动选择 成员   : {', '.join(auto_selector.get('outbounds', [])) or '<空>'}")
+else:
+    print("自动选择 状态   : 未找到")
 
 if cn_selector:
-    print(f"cn-proxy 默认  : {cn_selector.get('default', '<空>')}")
-    print(f"cn-proxy 成员  : {', '.join(cn_selector.get('outbounds', [])) or '<空>'}")
+    print(f"中国节点 默认   : {cn_selector.get('default', '<空>')}")
+    print(f"中国节点 成员   : {', '.join(cn_selector.get('outbounds', [])) or '<空>'}")
 else:
-    print("cn-proxy 状态  : 未找到")
+    print("中国节点 状态   : 未找到"))
 
 print(f"规则数量        : {len(rules)}")
 print("规则摘要        :")
