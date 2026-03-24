@@ -76,13 +76,13 @@ select_protocol_meta_file() {
   local label="$2"
   local idx meta_file
 
-  show_protocol_meta_list "${protocol}"
-  echo
+  show_protocol_meta_list "${protocol}" >&2
+  echo >&2
   idx="$(prompt_required "请输入要导出的 ${label} 编号")"
   meta_file="$(get_protocol_meta_by_index "${protocol}" "${idx}")"
 
   if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
-    err "编号无效"
+    err "编号无效" >&2
     return 1
   fi
 
