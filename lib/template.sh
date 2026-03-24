@@ -223,11 +223,17 @@ rules = route.get("rules", [])
 final = route.get("final", "")
 
 selector = None
-for ob in cfg.get("outbounds", []):
-    if ob.get("tag") == "proxy" and ob.get("type") == "selector":
-        selector = ob
-        break
+auto_selector = None
+cn_selector = None
 
+for ob in cfg.get("outbounds", []):
+    if ob.get("tag") == "手动切换" and ob.get("type") == "selector":
+        selector = ob
+    if ob.get("tag") == "自动选择" and ob.get("type") == "urltest":
+        auto_selector = ob
+    if ob.get("tag") == "中国节点" and ob.get("type") == "selector":
+        cn_selector = ob
+        
 def normalize_rules(rules):
     result = []
     for r in rules:
@@ -265,15 +271,15 @@ for ob in cfg.get("outbounds", []):
         cn_selector = ob
         break
 
-if nr == [private_rule] and final == "proxy":
+if nr == [private_rule] and final == "手动切换":
     template_name = "最小模板"
-elif nr == [private_rule, local_rule] and final == "proxy":
+elif nr == [private_rule, local_rule] and final == "手动切换":
     template_name = "常用模板"
-elif nr == [] and final == "proxy":
+elif nr == [] and final == "手动切换":
     template_name = "全局代理模板"
 elif nr == [private_rule, local_rule] and final == "direct":
     template_name = "直连优先模板"
-elif final == "proxy" and has_cn_proxy_rule and has_proxy_rule and cn_selector is not None:
+elif final == "手动切换" and has_cn_proxy_rule and has_proxy_rule and cn_selector is not None:
     template_name = "策略文件模板"
 
 print(f"当前模板        : {template_name}")
@@ -401,8 +407,13 @@ groups = policy.get("groups", {})
 for group_name, group_cfg in groups.items():
     gtype = group_cfg.get("type", "selector")
     members = resolve_members(group_cfg.get("members", []), remote_tags)
+
+    if not remote_tags:
+        members = [m for m in members if m != "自动选择"]
+
     if not members:
         members = ["direct"]
+
     obj = {
         "type": gtype,
         "tag": group_name,
@@ -443,7 +454,7 @@ for outbound_tag, suffixes in rules_cfg.get("route_groups", {}).items():
         })
 
 route["rules"] = rules
-route["final"] = rules_cfg.get("final", "proxy")
+route["final"] = rules_cfg.get("final", "手动切换")
 
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
