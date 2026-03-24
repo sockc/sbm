@@ -325,6 +325,61 @@ PY
   echo "pass-$(date +%s)"
 }
 
+gen_self_signed_cert() {
+  local server_name="$1"
+  local cert_dir="${BASE_DIR}/certs"
+  local cert_path="${cert_dir}/hy2-selfsigned.crt"
+  local key_path="${cert_dir}/hy2-selfsigned.key"
+  local san tmp_conf
+
+  if ! has_cmd openssl; then
+    err "未找到 openssl，无法自动生成自签证书"
+    return 1
+  fi
+
+  mkdir -p "${cert_dir}" "${TMP_DIR}"
+
+  if is_valid_ip "${server_name}"; then
+    san="IP:${server_name}"
+  else
+    san="DNS:${server_name}"
+  fi
+
+  tmp_conf="${TMP_DIR}/openssl-hy2-selfsigned.cnf"
+
+  cat > "${tmp_conf}" <<EOF
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+CN = ${server_name}
+
+[v3_req]
+subjectAltName = ${san}
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+  if ! openssl req -x509 -nodes -newkey rsa:2048 \
+    -days 3650 \
+    -keyout "${key_path}" \
+    -out "${cert_path}" \
+    -config "${tmp_conf}" \
+    -extensions v3_req >/dev/null 2>&1; then
+    err "生成自签证书失败"
+    return 1
+  fi
+
+  chmod 600 "${key_path}" 2>/dev/null || true
+  chmod 644 "${cert_path}" 2>/dev/null || true
+
+  printf '%s|%s\n' "${cert_path}" "${key_path}"
+}
+
 prompt_port_default() {
   local prompt="$1"
   local default_port="$2"
