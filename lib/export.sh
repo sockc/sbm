@@ -158,21 +158,149 @@ export_all_user_uris() {
   pause_enter
 }
 
+require_hy2_meta_file() {
+  local hy2_meta="${BASE_DIR}/hy2-meta.json"
+  if [ ! -f "${hy2_meta}" ]; then
+    err "未找到 ${hy2_meta}，请先部署 Hysteria2"
+    return 1
+  fi
+}
+
+build_hy2_uri() {
+  local hy2_meta="${BASE_DIR}/hy2-meta.json"
+
+  python3 - "${hy2_meta}" <<'PY'
+import json, sys, urllib.parse
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+host = str(meta["connect_host"])
+port = int(meta["listen_port"])
+password = str(meta["password"])
+sni = str(meta["server_name"])
+obfs_password = str(meta.get("obfs_password", "") or "")
+cert_mode = str(meta.get("cert_mode", "1"))
+
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
+
+auth = urllib.parse.quote(password, safe="")
+params = {"sni": sni}
+
+if obfs_password:
+    params["obfs"] = "salamander"
+    params["obfs-password"] = obfs_password
+
+# 自签证书为了方便导入，默认给 URI 加 insecure=1
+if cert_mode == "2":
+    params["insecure"] = "1"
+
+query = urllib.parse.urlencode(params)
+print(f"hysteria2://{auth}@{host}:{port}/?{query}")
+PY
+}
+
+build_hy2_singbox_json() {
+  local hy2_meta="${BASE_DIR}/hy2-meta.json"
+
+  python3 - "${hy2_meta}" <<'PY'
+import json, sys
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+host = meta["connect_host"]
+port = int(meta["listen_port"])
+password = meta["password"]
+sni = meta["server_name"]
+obfs_password = meta.get("obfs_password", "") or ""
+cert_mode = str(meta.get("cert_mode", "1"))
+
+out = {
+    "outbounds": [
+        {
+            "type": "hysteria2",
+            "tag": "hy2-out",
+            "server": host,
+            "server_port": port,
+            "password": password,
+            "tls": {
+                "enabled": True,
+                "server_name": sni
+            }
+        }
+    ]
+}
+
+if cert_mode == "2":
+    out["outbounds"][0]["tls"]["insecure"] = True
+
+if obfs_password:
+    out["outbounds"][0]["obfs"] = {
+        "type": "salamander",
+        "password": obfs_password
+    }
+
+print(json.dumps(out, ensure_ascii=False, indent=2))
+PY
+}
+
+export_hy2_uri() {
+  require_hy2_meta_file || { pause_enter; return 1; }
+
+  local uri
+  uri="$(build_hy2_uri)" || {
+    err "生成 Hysteria2 URI 失败"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "------ Hysteria2 URI ------"
+  echo "${uri}"
+  echo "---------------------------"
+  echo
+  echo "说明：如果你用的是自签证书，这里已默认附带 insecure=1，便于直接导入。"
+  echo
+
+  pause_enter
+}
+
+export_hy2_singbox_json() {
+  require_hy2_meta_file || { pause_enter; return 1; }
+
+  echo
+  echo "------ Hysteria2 sing-box 客户端 JSON ------"
+  build_hy2_singbox_json || {
+    err "生成 Hysteria2 客户端 JSON 失败"
+    pause_enter
+    return 1
+  }
+  echo
+  echo "-------------------------------------------"
+  echo
+
+  pause_enter
+}
+
 menu_export_client() {
   while true; do
     clear
     echo "======================================"
     echo "          导出客户端配置"
     echo "======================================"
-    echo "1. 导出单个用户 URI"
-    echo "2. 导出全部用户 URI"
+    echo "1. 导出单个用户 VLESS URI"
+    echo "2. 导出全部用户 VLESS URI"
+    echo "3. 导出 Hysteria2 URI"
+    echo "4. 导出 Hysteria2 sing-box JSON"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-2]: " choice
+    read -r -p "请选择 [0-4]: " choice
     case "${choice:-}" in
       1) export_single_user_uri ;;
       2) export_all_user_uris ;;
+      3) export_hy2_uri ;;
+      4) export_hy2_singbox_json ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
