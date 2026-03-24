@@ -953,11 +953,14 @@ menu_outbound_management() {
     echo "7. 应用指定节点源到当前策略组"
     echo "8. 应用全部节点源到当前策略组"
     echo "9. 查看当前已应用节点"
-    echo "10. 删除节点源"
+    echo "10. 查看当前 proxy 选择"
+    echo "11. 切换 proxy 到指定节点"
+    echo "12. 查看可切换节点列表"
+    echo "13. 删除节点源"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-10]: " choice
+    read -r -p "请选择 [0-13]: " choice
     case "${choice:-}" in
       1) add_subscription_url_source ;;
       2) import_local_singbox_file_source ;;
@@ -968,7 +971,10 @@ menu_outbound_management() {
       7) apply_one_source_to_runtime ;;
       8) apply_all_sources_to_runtime ;;
       9) show_current_applied_nodes ;;
-      10) delete_source ;;
+      10) show_current_proxy_selection ;;
+      11) switch_proxy_selector ;;
+      12) show_selector_candidates; pause_enter ;;
+      13) delete_source ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
