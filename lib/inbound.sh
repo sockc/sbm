@@ -402,6 +402,174 @@ prompt_port_default() {
   done
 }
 
+ensure_inbound_meta_dir() {
+  mkdir -p "${INBOUND_META_DIR}"
+}
+
+inbound_meta_name_by_tag() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe='._-'))
+PY
+}
+
+inbound_meta_file_by_tag() {
+  local tag="$1"
+  local name
+  name="$(inbound_meta_name_by_tag "${tag}")"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${name}"
+}
+
+show_current_inbounds() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+inbounds = cfg.get("inbounds", [])
+
+print("当前入站实例：")
+print("编号 标签                     类型         监听地址")
+print("----------------------------------------------------------------")
+
+idx = 1
+for ib in inbounds:
+    tag = ib.get("tag", "")
+    typ = ib.get("type", "")
+    listen = ib.get("listen", "")
+    port = ib.get("listen_port", "")
+    endpoint = f"{listen}:{port}" if listen and port else f"{listen or '<空>'}:{port or '<空>'}"
+    print(f"{idx:<4} {tag:<24} {typ:<12} {endpoint}")
+    idx += 1
+
+if idx == 1:
+    print("<暂无入站实例>")
+
+print("----------------------------------------------------------------")
+PY
+
+  pause_enter
+}
+
+get_inbound_tag_by_index() {
+  local idx="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+inbounds = cfg.get("inbounds", [])
+
+if idx < 1 or idx > len(inbounds):
+    raise SystemExit(1)
+
+print(inbounds[idx - 1].get("tag", ""))
+PY
+}
+
+delete_legacy_inbound_meta_by_tag() {
+  local tag="$1"
+
+  case "${tag}" in
+    vless-reality-in|reality-*|reality*)
+      rm -f "${BASE_DIR}/reality-meta.json"
+      ;;
+    hy2-in|hy2-*|hy2*)
+      rm -f "${BASE_DIR}/hy2-meta.json"
+      ;;
+    vmess-in|vmess-*|vmess*)
+      rm -f "${BASE_DIR}/vmess-meta.json"
+      rm -rf "${BASE_DIR}/vmess-meta"
+      ;;
+    tuic-in|tuic-*|tuic*)
+      rm -f "${BASE_DIR}/tuic-meta.json"
+      ;;
+    trojan-in|trojan-*|trojan*)
+      rm -f "${BASE_DIR}/trojan-meta.json"
+      ;;
+  esac
+}
+
+delete_inbound_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  ensure_inbound_meta_dir
+
+  show_current_inbounds
+  echo
+
+  local idx tag tmp_file meta_file
+  idx="$(prompt_required "请输入要删除的入站编号")"
+  tag="$(get_inbound_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo "准备删除入站实例：${tag}"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.delete-inbound.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+path_cfg, target_tag = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.get("inbounds", [])
+
+new_inbounds = [ib for ib in inbounds if ib.get("tag") != target_tag]
+if len(new_inbounds) == len(inbounds):
+    raise SystemExit(1)
+
+cfg["inbounds"] = new_inbounds
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除入站实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+  delete_legacy_inbound_meta_by_tag "${tag}"
+
+  ok "已删除入站实例：${tag}"
+  pause_enter
+}
+
 show_current_inbounds() {
   if [ ! -f "${CONFIG_DIR}/config.json" ]; then
     echo "未找到 ${CONFIG_DIR}/config.json"
@@ -1322,17 +1490,19 @@ menu_inbound_management() {
     echo "2. 部署/重装 Hysteria2"
     echo "3. 部署/重装 VMess"
     echo "4. 部署/重装 TUIC"
-    echo "5. 查看当前入站"
+    echo "5. 查看当前入站实例"
+    echo "6. 删除指定入站实例"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-5]: " choice
+    read -r -p "请选择 [0-6]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless_reality ;;
       2) menu_deploy_hysteria2 ;;
       3) menu_deploy_vmess ;;
       4) menu_deploy_tuic ;;
       5) show_current_inbounds ;;
+      6) delete_inbound_instance ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
