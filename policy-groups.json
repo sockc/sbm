@@ -1,4 +1,5 @@
-"groups": {
+{
+  "groups": {
     "手动切换": {
       "type": "selector",
       "members": [
