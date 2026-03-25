@@ -1571,10 +1571,11 @@ menu_inbound_management() {
     echo "4. 部署/重装 TUIC"
     echo "5. 查看当前入站实例"
     echo "6. 删除指定入站实例"
+    echo "7. 导出客户端 URI"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-6]: " choice
+    read -r -p "请选择 [0-7]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless_reality ;;
       2) menu_deploy_hysteria2 ;;
@@ -1582,6 +1583,7 @@ menu_inbound_management() {
       4) menu_deploy_tuic ;;
       5) show_current_inbounds ;;
       6) delete_inbound_instance ;;
+      7) menu_export_client ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
