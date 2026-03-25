@@ -286,33 +286,27 @@ main_menu() {
     show_header
     menu_item "1"  "安装/升级"
     menu_item "2"  "入站管理"
-    menu_item "3"  "导出URI"
-    menu_item "4"  "出站管理"
-    menu_item "5"  "系统代理"
-    menu_item "6"  "面板管理"
-    menu_item "7"  "分流模板"
-    menu_item "8"  "防火墙管理"
-    menu_item "9"  "备份与恢复"
-    menu_item "10" "服务状态"
-    menu_item "11" "更新脚本"
-    menu_item "12" "卸载"
+    menu_item "3"  "出站管理"
+    menu_item "4"  "系统代理"
+    menu_item "5"  "防火墙管理"
+    menu_item "6"  "备份与恢复"
+    menu_item "7"  "服务状态"
+    menu_item "8"  "更新脚本"
+    menu_item "9"  "卸载"
     menu_item "0"  "退出"
     echo
 
-    read -r -p "请选择 [0-12]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
       2) menu_inbound_management ;;
-      3) menu_export_client ;;
-      4) menu_outbound_management ;;
-      5) menu_system_proxy ;;
-      6) menu_clash_api_management ;;
-      7) menu_template_management ;;
-      8) menu_firewall_management ;;
-      9) menu_backup_management ;;
-      10) show_service_status; pause_enter ;;
-      11) menu_self_update ;;
-      12) menu_uninstall ;;
+      3) menu_outbound_management ;;
+      4) menu_system_proxy ;;
+      5) menu_firewall_management ;;
+      6) menu_backup_management ;;
+      7) show_service_status; pause_enter ;;
+      8) menu_self_update ;;
+      9) menu_uninstall ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
