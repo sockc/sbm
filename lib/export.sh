@@ -673,6 +673,30 @@ export_tuic_singbox_json() {
   pause_enter
 }
 
+show_uri_and_qr() {
+  local title="$1"
+  local uri="$2"
+
+  [ -z "${uri}" ] && return 0
+
+  echo
+  echo "------ ${title} ------"
+  echo "${uri}"
+  echo "----------------------"
+
+  if has_cmd qrencode; then
+    echo
+    echo "二维码："
+    qrencode -t ANSIUTF8 "${uri}" || true
+  else
+    echo
+    echo "提示：未检测到 qrencode，仅显示 URI。"
+    echo "Debian/Ubuntu 可安装：apt-get install -y qrencode"
+  fi
+
+  echo
+}
+
 menu_export_client() {
   while true; do
     clear
