@@ -18,13 +18,35 @@ fetch_text() {
   local url="$1"
 
   if has_cmd curl; then
-    curl -fsSL "$url"
-    return $?
+    # 先尝试完全绕过当前 shell 代理环境，避免被 127.0.0.1:7890 之类的失效代理拖死
+    if env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+          curl --noproxy '*' -fsSL "$url"; then
+      return 0
+    fi
+
+    # 直连失败时，再回退到当前环境（适配某些必须走代理的机器）
+    if curl -fsSL "$url"; then
+      return 0
+    fi
+
+    return 1
   fi
 
   if has_cmd wget; then
-    wget -qO- "$url"
-    return $?
+    # 先尝试禁用代理
+    if env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+          wget -e use_proxy=no -qO- "$url"; then
+      return 0
+    fi
+
+    # 再回退到当前环境
+    if wget -qO- "$url"; then
+      return 0
+    fi
+
+    return 1
   fi
 
   err "未找到 curl 或 wget"
@@ -83,6 +105,10 @@ run_self_update() {
 
   if ! fetch_text "$url" > "${tmp_installer}"; then
     err "下载远端 install.sh 失败"
+    echo
+    echo "提示："
+    echo "1. 请先检查当前 shell 是否残留 http_proxy / https_proxy / all_proxy"
+    echo "2. 可手动执行：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY"
     pause_enter
     return 1
   fi
