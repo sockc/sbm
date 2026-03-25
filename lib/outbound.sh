@@ -926,6 +926,31 @@ menu_outbound_management() {
     echo "======================================"
     echo "              出站管理"
     echo "======================================"
+    echo "1. 节点源管理"
+    echo "2. 策略组管理"
+    echo "3. 面板管理"
+    echo "4. 分流模板"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) menu_outbound_source_management ;;
+      2) menu_outbound_selector_management ;;
+      3) menu_clash_api_management ;;
+      4) menu_template_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_outbound_source_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             节点源管理"
+    echo "======================================"
     echo "1. 添加订阅 URL 源"
     echo "2. 导入本地 sing-box 文件"
     echo "3. 查看节点源"
@@ -934,15 +959,11 @@ menu_outbound_management() {
     echo "6. 预览导入节点"
     echo "7. 应用指定节点源到当前策略组"
     echo "8. 应用全部节点源到当前策略组"
-    echo "9. 查看当前已应用节点"
-    echo "10. 查看当前手动切换组选择"
-    echo "11. 切换手动切换组到指定节点"
-    echo "12. 查看手动切换组可选节点"
-    echo "13. 删除节点源"
+    echo "9. 删除节点源"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-13]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "${choice:-}" in
       1) add_subscription_url_source ;;
       2) import_local_singbox_file_source ;;
@@ -952,11 +973,32 @@ menu_outbound_management() {
       6) preview_source_nodes ;;
       7) apply_one_source_to_runtime ;;
       8) apply_all_sources_to_runtime ;;
-      9) show_current_applied_nodes ;;
-      10) show_current_proxy_selection ;;
-      11) switch_proxy_selector ;;
-      12) show_selector_candidates; pause_enter ;;
-      13) delete_source ;;
+      9) delete_source ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_outbound_selector_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             策略组管理"
+    echo "======================================"
+    echo "1. 查看当前已应用节点"
+    echo "2. 查看当前手动切换组选择"
+    echo "3. 切换手动切换组到指定节点"
+    echo "4. 查看手动切换组可选节点"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) show_current_applied_nodes ;;
+      2) show_current_proxy_selection ;;
+      3) switch_proxy_selector ;;
+      4) show_selector_candidates; pause_enter ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
