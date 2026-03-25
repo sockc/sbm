@@ -246,7 +246,7 @@ show_header() {
   printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "服务状态 :" "${C_RESET}" "${svc_color}" "${svc_status}" "${C_RESET}"
   printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "UI状态   :" "${C_RESET}" "${ui_color}" "${ui_status}" "${C_RESET}"
   printf "%b%-10s%b %s\n" "${C_BCYAN}" "UI地址   :" "${C_RESET}" "${ui_url}"
-  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "系统代理 :" "${C_RESET}" "${proxy_color}" "${proxy_status}" "${C_RESET}"
+  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "本地代理 :" "${C_RESET}" "${proxy_color}" "${proxy_status}" "${C_RESET}"
   printf "%b%-10s%b %s\n" "${C_BCYAN}" "代理地址 :" "${C_RESET}" "${proxy_addr}"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
@@ -287,7 +287,7 @@ main_menu() {
     menu_item "1"  "安装/升级"
     menu_item "2"  "入站管理"
     menu_item "3"  "出站管理"
-    menu_item "4"  "系统代理"
+    menu_item "4"  "本地代理"
     menu_item "5"  "防火墙管理"
     menu_item "6"  "备份与恢复"
     menu_item "7"  "服务状态"
