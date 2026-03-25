@@ -172,6 +172,39 @@ print(ui_url)
 PY
 }
 
+get_header_system_proxy_info() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, os, sys
+
+cfg_path = sys.argv[1]
+tag = "system-proxy-in"
+
+if not os.path.exists(cfg_path):
+    print("未启用")
+    print("<空>")
+    raise SystemExit(0)
+
+try:
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+except Exception:
+    print("配置异常")
+    print("<空>")
+    raise SystemExit(0)
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("tag") == tag and ib.get("type") == "mixed":
+        listen = str(ib.get("listen", "127.0.0.1") or "127.0.0.1")
+        port = str(ib.get("listen_port", "") or "")
+        endpoint = f"{listen}:{port}" if port else listen
+        print("已启用")
+        print(endpoint)
+        raise SystemExit(0)
+
+print("未启用")
+print("<空>")
+PY
+}
+
 show_header() {
   clear
 
@@ -179,7 +212,9 @@ show_header() {
   local sb_version="未安装"
   local ui_status="未启用"
   local ui_url="<空>"
-  local svc_color ui_color
+  local proxy_status="未启用"
+  local proxy_addr="<空>"
+  local svc_color ui_color proxy_color
 
   if command -v sing-box >/dev/null 2>&1; then
     sb_version="$(sing-box version 2>/dev/null | head -n1 || echo unknown)"
@@ -193,10 +228,15 @@ show_header() {
     mapfile -t _ui_info < <(get_header_ui_info)
     ui_status="${_ui_info[0]:-未启用}"
     ui_url="${_ui_info[1]:-<空>}"
+
+    mapfile -t _proxy_info < <(get_header_system_proxy_info)
+    proxy_status="${_proxy_info[0]:-未启用}"
+    proxy_addr="${_proxy_info[1]:-<空>}"
   fi
 
   svc_color="$(status_color "${svc_status}")"
   ui_color="$(ui_status_color "${ui_status}")"
+  proxy_color="$(ui_status_color "${proxy_status}")"
 
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "        Sing-box Manager (sbm)")"
@@ -206,6 +246,8 @@ show_header() {
   printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "服务状态 :" "${C_RESET}" "${svc_color}" "${svc_status}" "${C_RESET}"
   printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "UI状态   :" "${C_RESET}" "${ui_color}" "${ui_status}" "${C_RESET}"
   printf "%b%-10s%b %s\n" "${C_BCYAN}" "UI地址   :" "${C_RESET}" "${ui_url}"
+  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "系统代理 :" "${C_RESET}" "${proxy_color}" "${proxy_status}" "${C_RESET}"
+  printf "%b%-10s%b %s\n" "${C_BCYAN}" "代理地址 :" "${C_RESET}" "${proxy_addr}"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
 
