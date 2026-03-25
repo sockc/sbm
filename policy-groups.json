@@ -62,39 +62,39 @@
 
     "中国节点": {
       "type": "selector",
-      "members": ["MATCH:🇨🇳", "MATCH:中国"],
+      "members": ["MATCH:🇨🇳", "MATCH:中国"]
     },
     "香港节点": {
       "type": "selector",
-      "members": ["MATCH:🇭🇰", "MATCH:香港"],
+      "members": ["MATCH:🇭🇰", "MATCH:香港"]
     },
     "台湾节点": {
       "type": "selector",
-      "members": ["MATCH:🇹🇼", "MATCH:台湾"],
+      "members": ["MATCH:🇹🇼", "MATCH:台湾"]
     },
     "日本节点": {
       "type": "selector",
-      "members": ["MATCH:🇯🇵", "MATCH:日本"],
+      "members": ["MATCH:🇯🇵", "MATCH:日本"]
     },
     "新加坡节点": {
       "type": "selector",
-      "members": ["MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"],
+      "members": ["MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"]
     },
     "美国节点": {
       "type": "selector",
-      "members": ["MATCH:🇺🇸", "MATCH:美国"],
+      "members": ["MATCH:🇺🇸", "MATCH:美国"]
     },
     "英国节点": {
       "type": "selector",
-      "members": ["MATCH:🇬🇧", "MATCH:英国"],
+      "members": ["MATCH:🇬🇧", "MATCH:英国"]
     },
     "德国节点": {
       "type": "selector",
-      "members": ["MATCH:🇩🇪", "MATCH:德国"],
+      "members": ["MATCH:🇩🇪", "MATCH:德国"]
     },
     "荷兰节点": {
       "type": "selector",
-      "members": ["MATCH:🇳🇱", "MATCH:荷兰"],
+      "members": ["MATCH:🇳🇱", "MATCH:荷兰"]
     }
   },
 
