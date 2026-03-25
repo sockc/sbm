@@ -342,6 +342,11 @@ PY
   echo "----------------------------"
   echo
 
+  local reality_meta reality_uri
+  reality_meta="$(inbound_meta_file_by_tag "${reality_tag}")"
+  reality_uri="$(build_reality_uri_from_meta "${reality_meta}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "Reality URI" "${reality_uri}"
+
   pause_enter
 }
 
@@ -904,6 +909,11 @@ PY
     fi
   fi
 
+  local hy2_meta hy2_uri
+  hy2_meta="$(inbound_meta_file_by_tag "${hy2_tag}")"
+  hy2_uri="$(build_hy2_uri "${hy2_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "Hysteria2 URI" "${hy2_uri}"
+
   pause_enter
 }
 
@@ -1280,6 +1290,11 @@ PY
     fi
   fi
 
+  local vmess_meta vmess_uri
+  vmess_meta="$(inbound_meta_file_by_tag "${vmess_tag}")"
+  vmess_uri="$(build_vmess_uri "${vmess_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "VMess URI" "${vmess_uri}"
+
   pause_enter
 }
 
@@ -1551,6 +1566,11 @@ PY
       fi
     fi
   fi
+
+  local tuic_meta tuic_uri
+  tuic_meta="$(inbound_meta_file_by_tag "${tuic_tag}")"
+  tuic_uri="$(build_tuic_uri "${tuic_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "TUIC URI" "${tuic_uri}"
 
   pause_enter
 }
