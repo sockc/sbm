@@ -56,6 +56,7 @@ main() {
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/clash_api.sh" "$INSTALL_DIR/lib/clash_api.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/template.sh" "$INSTALL_DIR/lib/template.sh"
   install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/uninstall.sh" "$INSTALL_DIR/lib/uninstall.sh"
+  install_file "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/system_proxy.sh" "$INSTALL_DIR/lib/system_proxy.sh"
 
   # 先预留，后面做出站管理时不会再漏
   if fetch "https://raw.githubusercontent.com/${REPO}/${BRANCH}/lib/outbound.sh" >/dev/null 2>&1; then
