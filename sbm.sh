@@ -33,6 +33,8 @@ source "${BASE_DIR}/lib/clash_api.sh"
 source "${BASE_DIR}/lib/template.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/uninstall.sh"
+# shellcheck disable=SC1091
+source "${BASE_DIR}/lib/system_proxy.sh"
 
 init_colors() {
   if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
@@ -244,29 +246,31 @@ main_menu() {
     menu_item "2"  "入站管理"
     menu_item "3"  "导出URI"
     menu_item "4"  "出站管理"
-    menu_item "5"  "面板管理"
-    menu_item "6"  "分流模板"
-    menu_item "7"  "防火墙管理"
-    menu_item "8"  "备份与恢复"
-    menu_item "9"  "服务状态"
-    menu_item "10" "更新脚本"
-    menu_item "11" "卸载"
+    menu_item "5"  "系统代理"
+    menu_item "6"  "面板管理"
+    menu_item "7"  "分流模板"
+    menu_item "8"  "防火墙管理"
+    menu_item "9"  "备份与恢复"
+    menu_item "10" "服务状态"
+    menu_item "11" "更新脚本"
+    menu_item "12" "卸载"
     menu_item "0"  "退出"
     echo
 
-    read -r -p "请选择 [0-11]: " choice
+    read -r -p "请选择 [0-12]: " choice
     case "${choice:-}" in
       1) menu_install_core ;;
       2) menu_inbound_management ;;
       3) menu_export_client ;;
       4) menu_outbound_management ;;
-      5) menu_clash_api_management ;;
-      6) menu_template_management ;;
-      7) menu_firewall_management ;;
-      8) menu_backup_management ;;
-      9) show_service_status; pause_enter ;;
-      10) menu_self_update ;;
-      11) menu_uninstall ;;
+      5) menu_system_proxy ;;
+      6) menu_clash_api_management ;;
+      7) menu_template_management ;;
+      8) menu_firewall_management ;;
+      9) menu_backup_management ;;
+      10) show_service_status; pause_enter ;;
+      11) menu_self_update ;;
+      12) menu_uninstall ;;
       0) exit 0 ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
