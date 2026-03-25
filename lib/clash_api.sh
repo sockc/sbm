@@ -171,6 +171,12 @@ import json, sys
 cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
 exp = cfg.setdefault("experimental", {})
 
+# 启用 selector / clash mode 持久化
+cache = exp.setdefault("cache_file", {})
+cache["enabled"] = True
+cache["path"] = "cache.db"
+cache["cache_id"] = "sbm"
+
 if mode == "disable":
     exp.pop("clash_api", None)
 else:
