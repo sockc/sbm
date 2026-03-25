@@ -5,94 +5,94 @@
       "members": [
         "direct",
         "自动选择",
-        "中国节点",
-        "香港节点",
-        "台湾节点",
-        "日本节点",
-        "新加坡节点",
-        "美国节点",
-        "英国节点",
-        "德国节点",
-        "荷兰节点",
+        "🇨🇳 中国节点",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
         "ALL_NODES"
       ],
       "default": "自动选择"
     },
 
-    "谷歌服务": {
+    "🌐 谷歌服务": {
       "type": "selector",
-      "members": ["direct", "香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "YouTube": {
+    "📺 YouTube": {
       "type": "selector",
-      "members": ["direct", "香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "人工智能": {
+    "🧠 人工智能": {
       "type": "selector",
-      "members": ["direct", "美国节点", "新加坡节点", "日本节点", "香港节点", "台湾节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇺🇸 美国节点", "🇸🇬 新加坡节点", "🇯🇵 日本节点", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "Spotify": {
+    "🎧 Spotify": {
       "type": "selector",
-      "members": ["direct", "香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "Telegram": {
+    "📨 Telegram": {
       "type": "selector",
-      "members": ["direct", "新加坡节点", "香港节点", "台湾节点", "日本节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇸🇬 新加坡节点", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "跨境金融": {
+    "💳 跨境金融": {
       "type": "selector",
-      "members": ["direct", "香港节点", "新加坡节点", "英国节点", "美国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇸🇬 新加坡节点", "🇬🇧 英国节点", "🇺🇸 美国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "流媒体": {
+    "🎞️ 流媒体": {
       "type": "selector",
-      "members": ["direct", "香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
-    "社交平台": {
+    "💬 社交平台": {
       "type": "selector",
-      "members": ["direct", "香港节点", "台湾节点", "日本节点", "新加坡节点", "美国节点", "英国节点", "德国节点", "荷兰节点", "手动切换"],
+      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
       "default": "direct"
     },
 
-    "中国节点": {
+    "🇨🇳 中国节点": {
       "type": "selector",
       "members": ["MATCH:🇨🇳", "MATCH:中国"]
     },
-    "香港节点": {
+    "🇭🇰 香港节点": {
       "type": "selector",
       "members": ["MATCH:🇭🇰", "MATCH:香港"]
     },
-    "台湾节点": {
+    "🇹🇼 台湾节点": {
       "type": "selector",
       "members": ["MATCH:🇹🇼", "MATCH:台湾"]
     },
-    "日本节点": {
+    "🇯🇵 日本节点": {
       "type": "selector",
       "members": ["MATCH:🇯🇵", "MATCH:日本"]
     },
-    "新加坡节点": {
+    "🇸🇬 新加坡节点": {
       "type": "selector",
       "members": ["MATCH:🇸🇬", "MATCH:新加坡", "MATCH:狮城"]
     },
-    "美国节点": {
+    "🇺🇸 美国节点": {
       "type": "selector",
       "members": ["MATCH:🇺🇸", "MATCH:美国"]
     },
-    "英国节点": {
+    "🇬🇧 英国节点": {
       "type": "selector",
       "members": ["MATCH:🇬🇧", "MATCH:英国"]
     },
-    "德国节点": {
+    "🇩🇪 德国节点": {
       "type": "selector",
       "members": ["MATCH:🇩🇪", "MATCH:德国"]
     },
-    "荷兰节点": {
+    "🇳🇱 荷兰节点": {
       "type": "selector",
       "members": ["MATCH:🇳🇱", "MATCH:荷兰"]
     }
@@ -108,14 +108,14 @@
     ],
 
     "route_groups": {
-      "YouTube": [
+      "📺 YouTube": [
         "youtube.com",
         "youtu.be",
         "ytimg.com",
         "googlevideo.com",
         "youtube-nocookie.com"
       ],
-      "谷歌服务": [
+      "🌐 谷歌服务": [
         "google.com",
         "googleapis.com",
         "gstatic.com",
@@ -126,7 +126,7 @@
         "googlesyndication.com",
         "recaptcha.net"
       ],
-      "人工智能": [
+      "🧠 人工智能": [
         "openai.com",
         "chatgpt.com",
         "oaistatic.com",
@@ -138,13 +138,13 @@
         "grok.com",
         "x.ai"
       ],
-      "Spotify": [
+      "🎧 Spotify": [
         "spotify.com",
         "spotify.net",
         "scdn.co",
         "spotifycdn.com"
       ],
-      "Telegram": [
+      "📨 Telegram": [
         "telegram.org",
         "t.me",
         "telegram.me",
@@ -162,7 +162,7 @@
         "2001:67c:4e8::/48",
         "2a0a:f280::/32"
       ],
-      "跨境金融": [
+      "💳 跨境金融": [
         "wise.com",
         "revolut.com",
         "stripe.com",
@@ -171,7 +171,7 @@
         "visa.com",
         "mastercard.com"
       ],
-      "流媒体": [
+      "🎞️ 流媒体": [
         "netflix.com",
         "nflxvideo.net",
         "nflximg.net",
@@ -183,7 +183,7 @@
         "hulustream.com",
         "max.com"
       ],
-      "社交平台": [
+      "💬 社交平台": [
         "x.com",
         "twitter.com",
         "twimg.com",
@@ -200,7 +200,7 @@
         "reddit.com",
         "redditmedia.com"
       ],
-      "中国节点": [
+      "🇨🇳 中国节点": [
         "qq.com",
         "bilibili.com",
         "taobao.com",
