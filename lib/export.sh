@@ -780,8 +780,8 @@ menu_export_client() {
     echo "======================================"
     echo "            导出客户端配置"
     echo "======================================"
-    echo "1. 导出单个用户 Reality URI"
-    echo "2. 导出指定 Reality 实例全部用户 URI"
+    echo "1. 导出单个用户 VLESS URI"
+    echo "2. 导出指定 VLESS 实例全部用户 URI"
     echo "3. 导出 Hysteria2 URI"
     echo "4. 导出 Hysteria2 sing-box JSON"
     echo "5. 导出 VMess URI"
@@ -792,7 +792,7 @@ menu_export_client() {
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-8]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "${choice:-}" in
       1) export_single_user_uri ;;
       2) export_all_user_uris ;;
