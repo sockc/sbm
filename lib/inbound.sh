@@ -1593,6 +1593,442 @@ menu_deploy_tuic() {
   deploy_tuic
 }
 
+# ---------------------------
+# AnyTLS helpers
+# ---------------------------
+
+anytls_rand_port() {
+  python3 - <<'PY'
+import random
+print(random.randint(20000, 50000))
+PY
+}
+
+anytls_rand_password() {
+  python3 - <<'PY'
+import secrets, base64
+raw = secrets.token_bytes(18)
+print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+PY
+}
+
+anytls_rand_short_id() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(4))
+PY
+}
+
+anytls_meta_file_by_tag() {
+  local tag="$1"
+  mkdir -p "${INBOUND_META_DIR}"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${tag}"
+}
+
+save_anytls_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local password="$7"
+  local server_name="$8"
+  local cert_mode="$9"
+  local certificate_path="${10}"
+  local key_path="${11}"
+  local reality_public_key="${12}"
+  local reality_private_key="${13}"
+  local reality_short_id="${14}"
+  local handshake_server="${15}"
+  local handshake_port="${16}"
+  local utls_fingerprint="${17:-chrome}"
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" "${utls_fingerprint}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, password, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port, utls_fingerprint
+) = sys.argv[1:]
+
+data = {
+  "protocol": "anytls",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "password": password,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_enabled": mode == "reality",
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443,
+  "utls_fingerprint": utls_fingerprint
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+}
+
+generate_anytls_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+generate_anytls_reality_keypair() {
+  local out priv pub
+
+  if ! has_cmd sing-box; then
+    err "未找到 sing-box，无法生成 Reality 密钥"
+    return 1
+  fi
+
+  out="$(sing-box generate reality-keypair 2>/dev/null)" || return 1
+  priv="$(printf '%s\n' "${out}" | awk -F': ' '/Private/ {print $2; exit}')"
+  pub="$(printf '%s\n' "${out}" | awk -F': ' '/Public/  {print $2; exit}')"
+
+  if [ -z "${priv}" ] || [ -z "${pub}" ]; then
+    return 1
+  fi
+
+  printf '%s|%s\n' "${priv}" "${pub}"
+}
+
+deploy_anytls_tls() {
+  need_root
+
+  local cert_mode="$1"  # 1=正式证书 2=自签证书
+  local tag listen listen_port user_name password connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_required "请输入客户端连接地址")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_anytls_self_signed_cert "${tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.anytls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, password, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443" "chrome"
+
+  ok "AnyTLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "证书模式    : $([ "${cert_mode}" = "1" ] && echo 正式证书 || echo 自签证书)"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "----------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+deploy_anytls_reality() {
+  need_root
+
+  local tag listen listen_port user_name password connect_host server_name
+  local handshake_server handshake_port short_id keypair private_key public_key tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_required "请输入客户端连接地址")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI")"
+  handshake_server="$(prompt_default "请输入 Reality 握手域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手端口" "443")"
+  short_id="$(prompt_default "请输入 Reality short_id" "$(anytls_rand_short_id)")"
+
+  keypair="$(generate_anytls_reality_keypair)" || {
+    err "生成 Reality 密钥失败"
+    pause_enter
+    return 1
+  }
+  private_key="${keypair%%|*}"
+  public_key="${keypair##*|}"
+
+  tmp_file="${TMP_DIR}/config.anytls.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${handshake_server}" "${handshake_port}" "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+  cfg_path, tag, listen, listen_port, user_name, password,
+  handshake_server, handshake_port, private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "reality": {
+      "enabled": True,
+      "handshake": {
+        "server": handshake_server,
+        "server_port": int(handshake_port)
+      },
+      "private_key": private_key,
+      "short_id": [short_id]
+    }
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS + Reality 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}" "chrome"
+
+  ok "AnyTLS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "握手域名    : ${handshake_server}:${handshake_port}"
+  echo "uTLS 指纹   : chrome"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS + Reality 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "--------------------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_anytls() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             AnyTLS 入站"
+    echo "======================================"
+    echo "1. AnyTLS（正式证书）"
+    echo "2. AnyTLS（自签证书）"
+    echo "3. AnyTLS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_anytls_tls "1" ;;
+      2) deploy_anytls_tls "2" ;;
+      3) deploy_anytls_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
 menu_inbound_management() {
   while true; do
     clear
@@ -1603,21 +2039,23 @@ menu_inbound_management() {
     echo "2. 部署/重装 Hysteria2"
     echo "3. 部署/重装 VMess"
     echo "4. 部署/重装 TUIC"
-    echo "5. 查看当前入站实例"
-    echo "6. 删除指定入站实例"
-    echo "7. 导出客户端 URI"
+    echo "5. 部署/重装 AnyTLS"
+    echo "6. 查看当前入站实例"
+    echo "7. 删除指定入站实例"
+    echo "8. 导出客户端配置"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-7]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless_reality ;;
       2) menu_deploy_hysteria2 ;;
       3) menu_deploy_vmess ;;
       4) menu_deploy_tuic ;;
-      5) show_current_inbounds ;;
-      6) delete_inbound_instance ;;
-      7) menu_export_client ;;
+      5) menu_deploy_anytls ;;
+      6) show_current_inbounds ;;
+      7) delete_inbound_instance ;;
+      8) menu_export_client ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
