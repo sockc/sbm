@@ -250,7 +250,7 @@ for ib in cfg.get("inbounds", []):
     typ = str(ib.get("type", "") or "")
     if tag == "system-proxy-in":
         continue
-    if typ in ("vless", "vmess", "hysteria2", "tuic"):
+    if typ in ("vless", "vmess", "hysteria2", "tuic", "anytls"):
         count += 1
 
 print(count)
