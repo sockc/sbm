@@ -325,7 +325,7 @@ PY
     "${flow}" "${server_name}" "${handshake_server}" "${handshake_port}" \
     "${public_key}" "${private_key}" "${short_id}" "${tcp_fast_open}"
 
-  ok "VLESS + Reality 部署完成"
+ok "VLESS + Reality 部署完成"
   echo
   echo "------ 客户端关键参数 ------"
   echo "实例标签    : ${reality_tag}"
@@ -346,6 +346,20 @@ PY
   reality_meta="$(inbound_meta_file_by_tag "${reality_tag}")"
   reality_uri="$(build_reality_uri_from_meta "${reality_meta}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
   show_uri_and_qr "Reality URI" "${reality_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
 
   pause_enter
 }
