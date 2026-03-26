@@ -1597,6 +1597,32 @@ menu_deploy_tuic() {
 # AnyTLS helpers
 # ---------------------------
 
+detect_default_connect_host() {
+  local host=""
+
+  # 优先取 IPv4
+  if has_cmd curl; then
+    host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  elif has_cmd wget; then
+    host="$(wget -4 -qO- --timeout=5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+
+  host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+
+  # 再兜底
+  if [ -z "${host}" ]; then
+    host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+  fi
+
+  [ -z "${host}" ] && host="127.0.0.1"
+  printf '%s\n' "${host}"
+}
+
 anytls_rand_port() {
   python3 - <<'PY'
 import random
@@ -1744,7 +1770,7 @@ deploy_anytls_tls() {
   listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
-  connect_host="$(prompt_required "请输入客户端连接地址")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
   server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
 
   if [ "${cert_mode}" = "1" ]; then
@@ -1875,7 +1901,7 @@ deploy_anytls_reality() {
   listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
-  connect_host="$(prompt_required "请输入客户端连接地址")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
   server_name="$(prompt_required "请输入客户端 server_name / SNI")"
   handshake_server="$(prompt_default "请输入 Reality 握手域名" "${server_name}")"
   handshake_port="$(prompt_default "请输入 Reality 握手端口" "443")"
