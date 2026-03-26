@@ -90,9 +90,7 @@ status_color() {
     activating|reloading) printf "%s" "${C_BYELLOW}" ;;
     enabled) printf "%s" "${C_BGREEN}" ;;
     disabled) printf "%s" "${C_YELLOW}" ;;
-    *)
-      printf "%s" "${C_BCYAN}"
-      ;;
+    *) printf "%s" "${C_BCYAN}" ;;
   esac
 }
 
@@ -112,10 +110,35 @@ ui_status_color() {
   fi
 }
 
-menu_item() {
-  local num="$1"
-  local label="$2"
-  printf "%b%-4s%b %s\n" "${C_BCYAN}${C_BOLD}" "${num}." "${C_RESET}" "${label}"
+print_status_row() {
+  local lkey="$1"
+  local lval="$2"
+  local rkey="$3"
+  local rval="$4"
+  local lcolor="${5:-${C_RESET}}"
+  local rcolor="${6:-${C_RESET}}"
+
+  printf "%b%-10s%b %b%-14s%b  %b%-10s%b %b%s%b\n" \
+    "${C_BCYAN}" "${lkey}" "${C_RESET}" \
+    "${lcolor}" "${lval}" "${C_RESET}" \
+    "${C_BCYAN}" "${rkey}" "${C_RESET}" \
+    "${rcolor}" "${rval}" "${C_RESET}"
+}
+
+menu_row() {
+  local n1="$1"
+  local t1="$2"
+  local n2="${3:-}"
+  local t2="${4:-}"
+
+  if [ -n "${n2}" ]; then
+    printf "%b%-3s%b %-16s  %b%-3s%b %s\n" \
+      "${C_BCYAN}${C_BOLD}" "${n1}." "${C_RESET}" "${t1}" \
+      "${C_BCYAN}${C_BOLD}" "${n2}." "${C_RESET}" "${t2}"
+  else
+    printf "%b%-3s%b %s\n" \
+      "${C_BCYAN}${C_BOLD}" "${n1}." "${C_RESET}" "${t1}"
+  fi
 }
 
 get_header_ui_info() {
@@ -205,19 +228,47 @@ print("<空>")
 PY
 }
 
+get_header_inbound_count() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, os, sys
+
+cfg_path = sys.argv[1]
+
+if not os.path.exists(cfg_path):
+    print("0")
+    raise SystemExit(0)
+
+try:
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+count = 0
+for ib in cfg.get("inbounds", []):
+    tag = str(ib.get("tag", "") or "")
+    typ = str(ib.get("type", "") or "")
+    if tag == "system-proxy-in":
+        continue
+    if typ in ("vless", "vmess", "hysteria2", "tuic"):
+        count += 1
+
+print(count)
+PY
+}
+
 show_header() {
   clear
 
   local svc_status="未安装"
   local sb_version="未安装"
   local ui_status="未启用"
-  local ui_url="<空>"
   local proxy_status="未启用"
-  local proxy_addr="<空>"
+  local inbound_count="0"
   local svc_color ui_color proxy_color
 
   if command -v sing-box >/dev/null 2>&1; then
-    sb_version="$(sing-box version 2>/dev/null | head -n1 || echo unknown)"
+    sb_version="$(sing-box version 2>/dev/null | head -n1 | sed -E 's/^sing-box version[[:space:]]+//; s/[[:space:]].*$//' || echo unknown)"
   fi
 
   if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
@@ -227,11 +278,11 @@ show_header() {
   if [ -f "${CONFIG_DIR}/config.json" ] && command -v python3 >/dev/null 2>&1; then
     mapfile -t _ui_info < <(get_header_ui_info)
     ui_status="${_ui_info[0]:-未启用}"
-    ui_url="${_ui_info[1]:-<空>}"
 
     mapfile -t _proxy_info < <(get_header_system_proxy_info)
     proxy_status="${_proxy_info[0]:-未启用}"
-    proxy_addr="${_proxy_info[1]:-<空>}"
+
+    inbound_count="$(get_header_inbound_count 2>/dev/null || echo 0)"
   fi
 
   svc_color="$(status_color "${svc_status}")"
@@ -241,13 +292,11 @@ show_header() {
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "        Sing-box Manager (sbm)")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
-  printf "%b%-10s%b %s\n" "${C_BCYAN}" "脚本版本 :" "${C_RESET}" "${SBM_VERSION}"
-  printf "%b%-10s%b %s\n" "${C_BCYAN}" "sing-box :" "${C_RESET}" "${sb_version}"
-  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "服务状态 :" "${C_RESET}" "${svc_color}" "${svc_status}" "${C_RESET}"
-  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "UI状态   :" "${C_RESET}" "${ui_color}" "${ui_status}" "${C_RESET}"
-  printf "%b%-10s%b %s\n" "${C_BCYAN}" "UI地址   :" "${C_RESET}" "${ui_url}"
-  printf "%b%-10s%b %b%s%b\n" "${C_BCYAN}" "本地代理 :" "${C_RESET}" "${proxy_color}" "${proxy_status}" "${C_RESET}"
-  printf "%b%-10s%b %s\n" "${C_BCYAN}" "代理地址 :" "${C_RESET}" "${proxy_addr}"
+
+  print_status_row "脚本版本 :" "${SBM_VERSION}" "内核版本 :" "${sb_version}"
+  print_status_row "服务状态 :" "${svc_status}" "入站数量 :" "${inbound_count}" "${svc_color}" "${C_RESET}"
+  print_status_row "UI状态   :" "${ui_status}" "本地代理 :" "${proxy_status}" "${ui_color}" "${proxy_color}"
+
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
 
@@ -284,16 +333,11 @@ show_service_status() {
 main_menu() {
   while true; do
     show_header
-    menu_item "1"  "安装/升级"
-    menu_item "2"  "入站管理"
-    menu_item "3"  "出站管理"
-    menu_item "4"  "本地代理"
-    menu_item "5"  "防火墙管理"
-    menu_item "6"  "备份与恢复"
-    menu_item "7"  "服务状态"
-    menu_item "8"  "更新脚本"
-    menu_item "9"  "卸载"
-    menu_item "0"  "退出"
+    menu_row "1" "安装/升级"    "2" "入站管理"
+    menu_row "3" "出站管理"     "4" "本地代理"
+    menu_row "5" "防火墙管理"   "6" "备份与恢复"
+    menu_row "7" "服务状态"     "8" "更新脚本"
+    menu_row "9" "卸载"         "0" "退出"
     echo
 
     read -r -p "请选择 [0-9]: " choice
