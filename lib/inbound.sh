@@ -342,11 +342,17 @@ ok "VLESS + Reality 部署完成"
   echo "----------------------------"
   echo
 
-  local reality_meta reality_uri
-  reality_meta="$(inbound_meta_file_by_tag "${reality_tag}")"
-  reality_uri="$(build_reality_uri_from_meta "${reality_meta}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
-  show_uri_and_qr "Reality URI" "${reality_uri}"
+  save_vless_meta \
+    "${reality_tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
 
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${reality_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS Reality URI" "${vless_uri}"
+  
   if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
     local backend
     backend="$(detect_firewall_backend)"
@@ -2053,6 +2059,251 @@ menu_deploy_anytls() {
       *) echo "无效选项"; sleep 1 ;;
     esac
   done
+}
+
+vless_meta_file_by_tag() {
+  local tag="$1"
+  mkdir -p "${INBOUND_META_DIR}"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${tag}"
+}
+
+save_vless_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local user_uuid="$7"
+  local flow="$8"
+  local server_name="$9"
+  local cert_mode="${10}"
+  local certificate_path="${11}"
+  local key_path="${12}"
+  local reality_public_key="${13}"
+  local reality_private_key="${14}"
+  local reality_short_id="${15}"
+  local handshake_server="${16}"
+  local handshake_port="${17}"
+
+  local meta_file
+  meta_file="$(vless_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, user_uuid, flow, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port
+) = sys.argv[1:]
+
+data = {
+  "protocol": "vless",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "user_uuid": user_uuid,
+  "flow": flow,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+}
+
+generate_vless_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+menu_deploy_vless() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              VLESS 入站"
+    echo "======================================"
+    echo "1. VLESS + TLS（正式证书）"
+    echo "2. VLESS + TLS（自签证书）"
+    echo "3. VLESS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_vless_tls "1" ;;
+      2) deploy_vless_tls "2" ;;
+      3) deploy_vless_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+deploy_vless_tls() {
+  need_root
+
+  local cert_mode="$1"   # 1=正式证书 2=自签证书
+  local vless_tag listen listen_port user_name user_uuid connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  vless_tag="$(prompt_default "请输入 VLESS 实例标签" "vless-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_default "请输入 VLESS 监听端口" "$(random_port)")"
+  user_name="$(prompt_default "请输入 VLESS 用户备注" "vless-user1")"
+  user_uuid="$(prompt_default "请输入 VLESS UUID" "$(gen_uuid)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_vless_self_signed_cert "${vless_tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.vless.tls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${vless_tag}" "${listen}" "${listen_port}" "${user_name}" "${user_uuid}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, user_uuid, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "vless",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "uuid": user_uuid
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    break
+else:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VLESS + TLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${vless_tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443"
+
+  ok "VLESS + TLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${vless_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "传输        : tcp"
+  echo "TLS         : tls"
+  echo "SNI         : ${server_name}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${vless_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
 }
 
 menu_inbound_management() {
