@@ -774,6 +774,170 @@ show_uri_and_qr() {
   echo
 }
 
+list_vless_user_rows_by_tag() {
+  local tag="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") == "vless" and ib.get("tag") == tag:
+        for i, u in enumerate(ib.get("users", []), 1):
+            print(f"{i}\t{u.get('name', '')}\t{u.get('uuid', '')}")
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+get_vless_user_by_index_in_tag() {
+  local tag="$1"
+  local idx="$2"
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+idx = int(sys.argv[3])
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") == "vless" and ib.get("tag") == tag:
+        users = ib.get("users", [])
+        if idx < 1 or idx > len(users):
+            raise SystemExit(1)
+        u = users[idx - 1]
+        print(f"{u.get('name', '')}|{u.get('uuid', '')}")
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+build_vless_uri_from_meta() {
+  local meta_file="$1"
+  local user_name="$2"
+  local user_uuid="$3"
+
+  python3 - "${meta_file}" "${user_name}" "${user_uuid}" <<'PY'
+import json, sys, urllib.parse
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+name = sys.argv[2]
+uuid = sys.argv[3]
+
+host = str(meta["connect_host"])
+port = int(meta["listen_port"])
+mode = str(meta.get("mode", "reality") or "reality")
+
+if ":" in host and not host.startswith("["):
+    host = f"[{host}]"
+
+params = {
+    "encryption": "none",
+    "type": "tcp",
+}
+
+if mode == "reality":
+    params["security"] = "reality"
+    params["sni"] = meta["server_name"]
+    params["fp"] = "chrome"
+    params["pbk"] = meta["reality_public_key"]
+    params["sid"] = meta["reality_short_id"]
+    flow = str(meta.get("flow", "") or "")
+    if flow:
+        params["flow"] = flow
+else:
+    params["security"] = "tls"
+    params["sni"] = meta["server_name"]
+    if str(meta.get("cert_mode", "")) == "2":
+        params["insecure"] = "1"
+
+query = urllib.parse.urlencode(params)
+fragment = urllib.parse.quote(name, safe="")
+print(f"vless://{uuid}@{host}:{port}?{query}#{fragment}")
+PY
+}
+
+export_single_user_uri() {
+  local meta_file idx tag user_idx user_line user_name user_uuid uri
+
+  show_protocol_meta_list "vless"
+  echo
+  idx="$(prompt_required "请输入要导出的 VLESS 实例编号")"
+  meta_file="$(get_protocol_meta_by_index "vless" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    pause_enter
+    return 1
+  fi
+
+  tag="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(meta.get("tag", ""))
+PY
+)"
+
+  echo
+  echo "当前用户列表："
+  while IFS=$'\t' read -r n name uuid; do
+    [ -z "${n}" ] && continue
+    printf '%-4s %-16s %s\n' "$n" "$name" "$uuid"
+  done < <(list_vless_user_rows_by_tag "${tag}")
+
+  echo
+  user_idx="$(prompt_default "请输入要导出的用户编号" "1")"
+  user_line="$(get_vless_user_by_index_in_tag "${tag}" "${user_idx}")" || {
+    err "读取用户失败"
+    pause_enter
+    return 1
+  }
+
+  user_name="${user_line%%|*}"
+  user_uuid="${user_line##*|}"
+  uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}")"
+
+  show_uri_and_qr "VLESS URI" "${uri}"
+  pause_enter
+}
+
+export_all_user_uris() {
+  local meta_file idx tag found=0
+
+  show_protocol_meta_list "vless"
+  echo
+  idx="$(prompt_required "请输入要导出的 VLESS 实例编号")"
+  meta_file="$(get_protocol_meta_by_index "vless" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    pause_enter
+    return 1
+  fi
+
+  tag="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(meta.get("tag", ""))
+PY
+)"
+
+  while IFS=$'\t' read -r n name uuid; do
+    [ -z "${n}" ] && continue
+    found=1
+    echo "[$n] ${name}"
+    build_vless_uri_from_meta "${meta_file}" "${name}" "${uuid}"
+    echo
+  done < <(list_vless_user_rows_by_tag "${tag}")
+
+  if [ "${found}" -eq 0 ]; then
+    echo "暂无用户"
+  fi
+
+  pause_enter
+}
+
 menu_export_client() {
   while true; do
     clear
