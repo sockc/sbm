@@ -673,6 +673,83 @@ export_tuic_singbox_json() {
   pause_enter
 }
 
+build_anytls_singbox_json_from_meta() {
+  local meta_file="$1"
+
+  python3 - "${meta_file}" <<'PY'
+import json, sys
+
+meta = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+
+tls = {
+    "enabled": True
+}
+
+server_name = str(meta.get("server_name", "") or "")
+if server_name:
+    tls["server_name"] = server_name
+
+mode = str(meta.get("mode", "tls") or "tls")
+cert_mode = str(meta.get("cert_mode", "1") or "1")
+
+if mode == "reality":
+    tls["utls"] = {
+        "enabled": True,
+        "fingerprint": str(meta.get("utls_fingerprint", "chrome") or "chrome")
+    }
+    tls["reality"] = {
+        "enabled": True,
+        "public_key": str(meta.get("reality_public_key", "")),
+        "short_id": str(meta.get("reality_short_id", ""))
+    }
+elif cert_mode == "2":
+    tls["insecure"] = True
+
+obj = {
+    "outbounds": [
+        {
+            "type": "anytls",
+            "tag": "anytls-out",
+            "server": str(meta["connect_host"]),
+            "server_port": int(meta["listen_port"]),
+            "password": str(meta["password"]),
+            "tls": tls
+        }
+    ]
+}
+
+print(json.dumps(obj, ensure_ascii=False, indent=2))
+PY
+}
+
+export_anytls_singbox_json() {
+  local meta_file idx
+
+  show_protocol_meta_list "anytls"
+  echo
+  idx="$(prompt_required "请输入要导出的 AnyTLS 编号")"
+  meta_file="$(get_protocol_meta_by_index "anytls" "${idx}")"
+
+  if [ -z "${meta_file}" ] || [ ! -f "${meta_file}" ]; then
+    err "编号无效"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  echo "------ AnyTLS sing-box 客户端 JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || {
+    err "生成 AnyTLS 客户端 JSON 失败"
+    pause_enter
+    return 1
+  }
+  echo
+  echo "-----------------------------------------"
+  echo
+
+  pause_enter
+}
+
 show_uri_and_qr() {
   local title="$1"
   local uri="$2"
@@ -711,6 +788,7 @@ menu_export_client() {
     echo "6. 导出 VMess sing-box JSON"
     echo "7. 导出 TUIC URI"
     echo "8. 导出 TUIC sing-box JSON"
+    echo "9. 导出 AnyTLS sing-box JSON"
     echo "0. 返回"
     echo
 
@@ -724,6 +802,7 @@ menu_export_client() {
       6) export_vmess_singbox_json ;;
       7) export_tuic_uri ;;
       8) export_tuic_singbox_json ;;
+      9) export_anytls_singbox_json ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
