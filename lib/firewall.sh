@@ -16,22 +16,6 @@ detect_firewall_backend() {
   echo "none"
 }
 
-get_current_vless_port() {
-  if [ ! -f "${CONFIG_DIR}/config.json" ]; then
-    return 1
-  fi
-
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-for ib in cfg.get("inbounds", []):
-    if ib.get("type") == "vless" and ib.get("tag") == "vless-reality-in":
-        print(ib.get("listen_port", ""))
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-}
-
 detect_ssh_port() {
   if has_cmd sshd; then
     sshd -T 2>/dev/null | awk '/^port /{print $2; exit}'
@@ -151,41 +135,6 @@ fw_close_port() {
   esac
 }
 
-allow_current_vless_port() {
-  need_root
-
-  local backend port
-  backend="$(detect_firewall_backend)"
-  port="$(get_current_vless_port || true)"
-
-  if [ -z "$port" ]; then
-    err "未检测到当前 VLESS + Reality 监听端口，请先部署"
-    pause_enter
-    return 1
-  fi
-
-  if [ "$backend" = "none" ]; then
-    err "未检测到受支持的防火墙后端"
-    pause_enter
-    return 1
-  fi
-
-  echo "当前检测到 Reality 监听端口: ${port}/tcp"
-  if ! confirm_default_yes "确认放行该端口吗？"; then
-    warn "已取消"
-    pause_enter
-    return 0
-  fi
-
-  if fw_open_port "$backend" "$port" "tcp"; then
-    ok "已放行 ${port}/tcp"
-  else
-    err "放行失败"
-  fi
-
-  pause_enter
-}
-
 allow_ssh_port() {
   need_root
 
@@ -282,6 +231,8 @@ close_custom_port() {
 }
 
 toggle_firewall() {
+  need_root
+  
   local backend
   backend="$(detect_firewall_backend)"
 
@@ -298,10 +249,15 @@ toggle_firewall() {
           ufw disable
           ok "ufw 已关闭"
         fi
-      else
+        else
         if confirm_default_yes "当前 ufw 未开启，是否启用？"; then
+          local ssh_port
+          ssh_port="$(detect_ssh_port)"
+          [ -z "${ssh_port}" ] && ssh_port="22"
+
+          ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
           ufw --force enable
-          ok "ufw 已开启"
+          ok "ufw 已开启，并已尝试放行 SSH 端口 ${ssh_port}/tcp"
         fi
       fi
       ;;
