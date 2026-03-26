@@ -2061,7 +2061,7 @@ menu_inbound_management() {
     echo "======================================"
     echo "              入站管理"
     echo "======================================"
-    echo "1. 部署/重装 VLESS + Reality"
+    echo "1. 部署/重装 VLESS"
     echo "2. 部署/重装 Hysteria2"
     echo "3. 部署/重装 VMess"
     echo "4. 部署/重装 TUIC"
@@ -2074,7 +2074,7 @@ menu_inbound_management() {
 
     read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
-      1) menu_deploy_vless_reality ;;
+      1) menu_deploy_vless ;;
       2) menu_deploy_hysteria2 ;;
       3) menu_deploy_vmess ;;
       4) menu_deploy_tuic ;;
