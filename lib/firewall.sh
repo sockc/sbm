@@ -281,14 +281,64 @@ close_custom_port() {
   pause_enter
 }
 
+toggle_firewall() {
+  local backend
+  backend="$(detect_firewall_backend)"
+
+  if [ "${backend}" = "none" ]; then
+    err "未检测到可用防火墙（ufw / firewalld / iptables）"
+    pause_enter
+    return 1
+  fi
+
+  case "${backend}" in
+    ufw)
+      if ufw status 2>/dev/null | grep -qi "Status: active"; then
+        if confirm_default_yes "当前 ufw 已开启，是否关闭？"; then
+          ufw disable
+          ok "ufw 已关闭"
+        fi
+      else
+        if confirm_default_yes "当前 ufw 未开启，是否启用？"; then
+          ufw --force enable
+          ok "ufw 已开启"
+        fi
+      fi
+      ;;
+    firewalld)
+      if systemctl is-active firewalld >/dev/null 2>&1; then
+        if confirm_default_yes "当前 firewalld 已开启，是否关闭？"; then
+          systemctl stop firewalld
+          systemctl disable firewalld >/dev/null 2>&1 || true
+          ok "firewalld 已关闭"
+        fi
+      else
+        if confirm_default_yes "当前 firewalld 未开启，是否启用？"; then
+          systemctl enable --now firewalld
+          ok "firewalld 已开启"
+        fi
+      fi
+      ;;
+    iptables)
+      warn "检测到的是 iptables，通常不建议做一键开关。"
+      echo "请通过“放行自定义端口 / 关闭自定义端口”管理规则。"
+      ;;
+    *)
+      err "暂不支持的防火墙后端：${backend}"
+      ;;
+  esac
+
+  pause_enter
+}
+
 menu_firewall_management() {
   while true; do
     clear
     echo "======================================"
     echo "            防火墙管理"
     echo "======================================"
-    echo "1. 查看防火墙状态"
-    echo "2. 一键放行当前 Reality 端口"
+    echo "1. 开启/关闭防火墙"
+    echo "2. 查看防火墙状态"
     echo "3. 放行 SSH 端口"
     echo "4. 放行自定义端口"
     echo "5. 关闭自定义端口"
@@ -297,8 +347,8 @@ menu_firewall_management() {
 
     read -r -p "请选择 [0-5]: " choice
     case "${choice:-}" in
-      1) show_firewall_status; pause_enter ;;
-      2) allow_current_vless_port ;;
+      1) toggle_firewall ;;
+      2) show_firewall_status; pause_enter ;;
       3) allow_ssh_port ;;
       4) allow_custom_port ;;
       5) close_custom_port ;;
