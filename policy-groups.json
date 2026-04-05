@@ -45,6 +45,7 @@
       ],
       "default": "direct"
     },
+
     "📺 YouTube": {
       "type": "selector",
       "members": [
@@ -61,6 +62,7 @@
       ],
       "default": "direct"
     },
+
     "🧠 人工智能": {
       "type": "selector",
       "members": [
@@ -77,6 +79,7 @@
       ],
       "default": "direct"
     },
+
     "🎧 Spotify": {
       "type": "selector",
       "members": [
@@ -93,6 +96,7 @@
       ],
       "default": "direct"
     },
+
     "📨 Telegram": {
       "type": "selector",
       "members": [
@@ -109,6 +113,7 @@
       ],
       "default": "direct"
     },
+
     "💳 跨境金融": {
       "type": "selector",
       "members": [
@@ -123,6 +128,7 @@
       ],
       "default": "direct"
     },
+
     "🎞️ 流媒体": {
       "type": "selector",
       "members": [
@@ -139,6 +145,7 @@
       ],
       "default": "direct"
     },
+
     "💬 社交平台": {
       "type": "selector",
       "members": [
@@ -173,6 +180,7 @@
         "MATCH:杭州"
       ]
     },
+
     "🇭🇰 香港节点": {
       "type": "selector",
       "members": [
@@ -189,6 +197,7 @@
         "MATCH:新界"
       ]
     },
+
     "🇹🇼 台湾节点": {
       "type": "selector",
       "members": [
@@ -212,6 +221,7 @@
         "MATCH:新竹"
       ]
     },
+
     "🇯🇵 日本节点": {
       "type": "selector",
       "members": [
@@ -231,6 +241,7 @@
         "MATCH:Nagoya"
       ]
     },
+
     "🇸🇬 新加坡节点": {
       "type": "selector",
       "members": [
@@ -245,6 +256,7 @@
         "MATCH:裕廊"
       ]
     },
+
     "🇺🇸 美国节点": {
       "type": "selector",
       "members": [
@@ -266,6 +278,7 @@
         "MATCH:硅谷"
       ]
     },
+
     "🇬🇧 英国节点": {
       "type": "selector",
       "members": [
@@ -284,6 +297,7 @@
         "MATCH:Manchester"
       ]
     },
+
     "🇩🇪 德国节点": {
       "type": "selector",
       "members": [
@@ -302,6 +316,7 @@
         "MATCH:慕尼黑"
       ]
     },
+
     "🇳🇱 荷兰节点": {
       "type": "selector",
       "members": [
@@ -341,6 +356,20 @@
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs",
+        "download_detour": "direct",
+        "update_interval": "1d"
+      },
+      "geosite-telegram": {
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/telegram.srs",
+        "download_detour": "direct",
+        "update_interval": "1d"
+      },
+      "geoip-telegram": {
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs",
         "download_detour": "direct",
         "update_interval": "1d"
       }
@@ -383,13 +412,6 @@
         "scdn.co",
         "spotifycdn.com"
       ],
-      "📨 Telegram": [
-        "telegram.org",
-        "t.me",
-        "telegram.me",
-        "telegra.ph",
-        "tdesktop.com"
-      ],
       "💳 跨境金融": [
         "wise.com",
         "revolut.com",
@@ -430,26 +452,14 @@
       ]
     },
 
-    "route_ip_cidr_groups": {
-      "📨 Telegram": [
-        "91.108.4.0/22",
-        "91.108.8.0/22",
-        "91.108.12.0/22",
-        "91.108.16.0/22",
-        "91.108.20.0/22",
-        "91.108.56.0/22",
-        "149.154.160.0/20",
-        "185.76.151.0/24",
-        "2001:b28::/32",
-        "2001:67c:4e8::/48",
-        "2a0a:f280::/32"
-      ]
-    },
-
     "route_rule_set_groups": {
       "🏠 中国流量": [
         "geosite-cn",
         "geoip-cn"
+      ],
+      "📨 Telegram": [
+        "geosite-telegram",
+        "geoip-telegram"
       ]
     },
 
