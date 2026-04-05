@@ -21,207 +21,294 @@
 
     "🌐 谷歌服务": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "📺 YouTube": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "🧠 人工智能": {
       "type": "selector",
-      "members": ["direct", "🇺🇸 美国节点", "🇸🇬 新加坡节点", "🇯🇵 日本节点", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇺🇸 美国节点",
+        "🇸🇬 新加坡节点",
+        "🇯🇵 日本节点",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "🎧 Spotify": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "📨 Telegram": {
       "type": "selector",
-      "members": ["direct", "🇸🇬 新加坡节点", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇸🇬 新加坡节点",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "💳 跨境金融": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇸🇬 新加坡节点", "🇬🇧 英国节点", "🇺🇸 美国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇸🇬 新加坡节点",
+        "🇬🇧 英国节点",
+        "🇺🇸 美国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "🎞️ 流媒体": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
     "💬 社交平台": {
       "type": "selector",
-      "members": ["direct", "🇭🇰 香港节点", "🇹🇼 台湾节点", "🇯🇵 日本节点", "🇸🇬 新加坡节点", "🇺🇸 美国节点", "🇬🇧 英国节点", "🇩🇪 德国节点", "🇳🇱 荷兰节点", "手动切换"],
+      "members": [
+        "direct",
+        "🇭🇰 香港节点",
+        "🇹🇼 台湾节点",
+        "🇯🇵 日本节点",
+        "🇸🇬 新加坡节点",
+        "🇺🇸 美国节点",
+        "🇬🇧 英国节点",
+        "🇩🇪 德国节点",
+        "🇳🇱 荷兰节点",
+        "手动切换"
+      ],
       "default": "direct"
     },
 
-"🇨🇳 中国节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇨🇳",
-    "MATCH:中国",
-    "MATCH:大陆",
-    "MATCH:内地",
-    "MATCH:China",
-    "MATCH:CN",
-    "MATCH:CHN",
-    "MATCH:北京",
-    "MATCH:上海",
-    "MATCH:广州",
-    "MATCH:深圳",
-    "MATCH:杭州"
-  ]
-},
-"🇭🇰 香港节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇭🇰",
-    "MATCH:香港",
-    "MATCH:HK",
-    "MATCH:HKG",
-    "MATCH:Hong Kong",
-    "MATCH:HongKong",
-    "MATCH:HKBN",
-    "MATCH:CMHK",
-    "MATCH:九龍",
-    "MATCH:九龙",
-    "MATCH:新界"
-  ]
-},
-"🇹🇼 台湾节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇹🇼",
-    "MATCH:台湾",
-    "MATCH:台灣",
-    "MATCH:TW",
-    "MATCH:TWN",
-    "MATCH:TPE",
-    "MATCH:Taiwan",
-    "MATCH:Taipei",
-    "MATCH:台北",
-    "MATCH:新北",
-    "MATCH:桃园",
-    "MATCH:桃園",
-    "MATCH:台中",
-    "MATCH:臺中",
-    "MATCH:台南",
-    "MATCH:臺南",
-    "MATCH:高雄",
-    "MATCH:新竹"
-  ]
-},
-"🇯🇵 日本节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇯🇵",
-    "MATCH:日本",
-    "MATCH:JP",
-    "MATCH:JPN",
-    "MATCH:Japan",
-    "MATCH:Tokyo",
-    "MATCH:大阪",
-    "MATCH:东京",
-    "MATCH:東京",
-    "MATCH:Osaka",
-    "MATCH:Yokohama",
-    "MATCH:横滨",
-    "MATCH:名古屋",
-    "MATCH:Nagoya"
-  ]
-},
-"🇸🇬 新加坡节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇸🇬",
-    "MATCH:新加坡",
-    "MATCH:狮城",
-    "MATCH:SG",
-    "MATCH:SGP",
-    "MATCH:SIN",
-    "MATCH:Singapore",
-    "MATCH:Jurong",
-    "MATCH:裕廊"
-  ]
-},
-"🇺🇸 美国节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇺🇸",
-    "MATCH:美国",
-    "MATCH:美國",
-    "MATCH:USA",
-    "MATCH:US",
-    "MATCH:United States",
-    "MATCH:America",
-    "MATCH:洛杉矶",
-    "MATCH:洛杉磯",
-    "MATCH:Los Angeles",
-    "MATCH:San Jose",
-    "MATCH:Seattle",
-    "MATCH:New York",
-    "MATCH:NYC",
-    "MATCH:Chicago",
-    "MATCH:硅谷"
-  ]
-},
-"🇬🇧 英国节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇬🇧",
-    "MATCH:英国",
-    "MATCH:英國",
-    "MATCH:UK",
-    "MATCH:GB",
-    "MATCH:GBR",
-    "MATCH:United Kingdom",
-    "MATCH:Britain",
-    "MATCH:England",
-    "MATCH:London",
-    "MATCH:伦敦",
-    "MATCH:倫敦",
-    "MATCH:Manchester"
-  ]
-},
-"🇩🇪 德国节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇩🇪",
-    "MATCH:德国",
-    "MATCH:德國",
-    "MATCH:DE",
-    "MATCH:DEU",
-    "MATCH:Germany",
-    "MATCH:Frankfurt",
-    "MATCH:法兰克福",
-    "MATCH:法蘭克福",
-    "MATCH:Berlin",
-    "MATCH:柏林",
-    "MATCH:Munich",
-    "MATCH:慕尼黑"
-  ]
-},
-"🇳🇱 荷兰节点": {
-  "type": "selector",
-  "members": [
-    "MATCH:🇳🇱",
-    "MATCH:荷兰",
-    "MATCH:荷蘭",
-    "MATCH:NL",
-    "MATCH:NLD",
-    "MATCH:Netherlands",
-    "MATCH:Holland",
-    "MATCH:Amsterdam",
-    "MATCH:阿姆斯特丹",
-    "MATCH:Rotterdam",
-    "MATCH:鹿特丹"
-  ]
-}
+    "🇨🇳 中国节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇨🇳",
+        "MATCH:中国",
+        "MATCH:大陆",
+        "MATCH:内地",
+        "MATCH:China",
+        "MATCH:CN",
+        "MATCH:CHN",
+        "MATCH:北京",
+        "MATCH:上海",
+        "MATCH:广州",
+        "MATCH:深圳",
+        "MATCH:杭州"
+      ]
+    },
+    "🇭🇰 香港节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇭🇰",
+        "MATCH:香港",
+        "MATCH:HK",
+        "MATCH:HKG",
+        "MATCH:Hong Kong",
+        "MATCH:HongKong",
+        "MATCH:HKBN",
+        "MATCH:CMHK",
+        "MATCH:九龍",
+        "MATCH:九龙",
+        "MATCH:新界"
+      ]
+    },
+    "🇹🇼 台湾节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇹🇼",
+        "MATCH:台湾",
+        "MATCH:台灣",
+        "MATCH:TW",
+        "MATCH:TWN",
+        "MATCH:TPE",
+        "MATCH:Taiwan",
+        "MATCH:Taipei",
+        "MATCH:台北",
+        "MATCH:新北",
+        "MATCH:桃园",
+        "MATCH:桃園",
+        "MATCH:台中",
+        "MATCH:臺中",
+        "MATCH:台南",
+        "MATCH:臺南",
+        "MATCH:高雄",
+        "MATCH:新竹"
+      ]
+    },
+    "🇯🇵 日本节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇯🇵",
+        "MATCH:日本",
+        "MATCH:JP",
+        "MATCH:JPN",
+        "MATCH:Japan",
+        "MATCH:Tokyo",
+        "MATCH:大阪",
+        "MATCH:东京",
+        "MATCH:東京",
+        "MATCH:Osaka",
+        "MATCH:Yokohama",
+        "MATCH:横滨",
+        "MATCH:名古屋",
+        "MATCH:Nagoya"
+      ]
+    },
+    "🇸🇬 新加坡节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇸🇬",
+        "MATCH:新加坡",
+        "MATCH:狮城",
+        "MATCH:SG",
+        "MATCH:SGP",
+        "MATCH:SIN",
+        "MATCH:Singapore",
+        "MATCH:Jurong",
+        "MATCH:裕廊"
+      ]
+    },
+    "🇺🇸 美国节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇺🇸",
+        "MATCH:美国",
+        "MATCH:美國",
+        "MATCH:USA",
+        "MATCH:US",
+        "MATCH:United States",
+        "MATCH:America",
+        "MATCH:洛杉矶",
+        "MATCH:洛杉磯",
+        "MATCH:Los Angeles",
+        "MATCH:San Jose",
+        "MATCH:Seattle",
+        "MATCH:New York",
+        "MATCH:NYC",
+        "MATCH:Chicago",
+        "MATCH:硅谷"
+      ]
+    },
+    "🇬🇧 英国节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇬🇧",
+        "MATCH:英国",
+        "MATCH:英國",
+        "MATCH:UK",
+        "MATCH:GB",
+        "MATCH:GBR",
+        "MATCH:United Kingdom",
+        "MATCH:Britain",
+        "MATCH:England",
+        "MATCH:London",
+        "MATCH:伦敦",
+        "MATCH:倫敦",
+        "MATCH:Manchester"
+      ]
+    },
+    "🇩🇪 德国节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇩🇪",
+        "MATCH:德国",
+        "MATCH:德國",
+        "MATCH:DE",
+        "MATCH:DEU",
+        "MATCH:Germany",
+        "MATCH:Frankfurt",
+        "MATCH:法兰克福",
+        "MATCH:法蘭克福",
+        "MATCH:Berlin",
+        "MATCH:柏林",
+        "MATCH:Munich",
+        "MATCH:慕尼黑"
+      ]
+    },
+    "🇳🇱 荷兰节点": {
+      "type": "selector",
+      "members": [
+        "MATCH:🇳🇱",
+        "MATCH:荷兰",
+        "MATCH:荷蘭",
+        "MATCH:NL",
+        "MATCH:NLD",
+        "MATCH:Netherlands",
+        "MATCH:Holland",
+        "MATCH:Amsterdam",
+        "MATCH:阿姆斯特丹",
+        "MATCH:Rotterdam",
+        "MATCH:鹿特丹"
+      ]
+    }
+  },
 
   "rules": {
     "direct_domain_suffix": [
