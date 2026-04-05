@@ -1480,12 +1480,214 @@ menu_route_template_shortcuts() {
   done
 }
 
+print_outbound_status_line() {
+  local l1="$1" v1="$2" l2="$3" v2="$4"
+  printf "%-10s %-14s %-10s %s\n" "${l1}" "${v1}" "${l2}" "${v2}"
+}
+
+get_outbound_status_info() {
+  python3 - "${CONFIG_DIR}/config.json" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" <<'PY'
+import glob
+import ipaddress
+import json
+import os
+import sys
+
+config_path, sources_dir, node_cache_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+
+REMOTE_TYPES = {
+    "socks", "http", "shadowsocks", "vmess", "trojan", "wireguard", "hysteria",
+    "vless", "shadowtls", "tuic", "hysteria2", "anytls", "tor", "ssh", "naive"
+}
+
+def safe_load_json(path, default):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+cfg = safe_load_json(config_path, {})
+outbounds = cfg.get("outbounds", [])
+route = cfg.get("route", {})
+rules = route.get("rules", [])
+final = str(route.get("final", "") or "")
+
+# ---------- 面板状态 ----------
+panel_status = "未启用"
+clash = cfg.get("experimental", {}).get("clash_api", {}) if isinstance(cfg, dict) else {}
+controller = str(clash.get("external_controller", "") or "")
+if controller:
+    host = controller
+    if controller.startswith("[") and "]:" in controller:
+        host = controller.rsplit(":", 1)[0]
+    elif ":" in controller:
+        host = controller.rsplit(":", 1)[0]
+
+    host = host.strip("[]")
+
+    if host in ("127.0.0.1", "localhost", "::1"):
+        panel_status = "本机"
+    elif host in ("0.0.0.0", "::"):
+        panel_status = "公网"
+    else:
+        try:
+            ip = ipaddress.ip_address(host)
+            panel_status = "局域网" if ip.is_private else "自定义"
+        except Exception:
+            panel_status = "自定义"
+
+# ---------- 节点源 ----------
+source_meta_files = sorted(glob.glob(os.path.join(sources_dir, "source-*.json")))
+source_total = len(source_meta_files)
+source_ready = 0
+
+for meta_path in source_meta_files:
+    meta = safe_load_json(meta_path, {})
+    source_id = str(meta.get("id", "") or "")
+    if not source_id:
+        continue
+    cache_file = os.path.join(node_cache_dir, f"{source_id}.outbounds.json")
+    if os.path.isfile(cache_file):
+        source_ready += 1
+
+source_summary = f"{source_ready}/{source_total}"
+
+# ---------- 缓存节点 ----------
+cache_nodes = 0
+for cache_path in glob.glob(os.path.join(node_cache_dir, "*.outbounds.json")):
+    data = safe_load_json(cache_path, [])
+    if isinstance(data, list):
+        cache_nodes += sum(1 for x in data if isinstance(x, dict))
+
+# ---------- 已应用节点 ----------
+applied_nodes = 0
+for ob in outbounds:
+    typ = str(ob.get("type", "") or "")
+    tag = str(ob.get("tag", "") or "")
+    if typ in REMOTE_TYPES and tag not in ("direct", "block", "dns-out"):
+        applied_nodes += 1
+
+# ---------- 当前模板 ----------
+def normalize_rules(rules):
+    result = []
+    for r in rules:
+        item = {}
+        if r.get("ip_is_private") is True:
+            item["ip_is_private"] = True
+        if "domain_suffix" in r:
+            item["domain_suffix"] = sorted(r.get("domain_suffix", []))
+        if "ip_cidr" in r:
+            item["ip_cidr"] = sorted(r.get("ip_cidr", []))
+        if "rule_set" in r:
+            rs = r.get("rule_set", [])
+            if isinstance(rs, list):
+                item["rule_set"] = sorted(rs)
+            else:
+                item["rule_set"] = [rs]
+        item["action"] = r.get("action", "")
+        item["outbound"] = r.get("outbound", "")
+        result.append(item)
+    return result
+
+local_rule = {
+    "domain_suffix": sorted(["lan", "local", "home.arpa", "localhost"]),
+    "action": "route",
+    "outbound": "direct"
+}
+
+private_rule = {
+    "ip_is_private": True,
+    "action": "route",
+    "outbound": "direct"
+}
+
+nr = normalize_rules(rules)
+template_name = "自定义"
+
+has_rule_set_cfg = bool(route.get("rule_set"))
+has_rule_set_rule = any("rule_set" in r for r in rules)
+has_ip_cidr_rule = any("ip_cidr" in r for r in rules)
+has_custom_group_rule = any(
+    str(r.get("outbound", "") or "") not in ("", "direct", "proxy", "手动切换")
+    for r in rules
+)
+
+if nr == [private_rule] and final == "proxy":
+    template_name = "最小模板"
+elif nr == [private_rule, local_rule] and final == "proxy":
+    template_name = "常用模板"
+elif nr == [] and final == "proxy":
+    template_name = "全局代理"
+elif nr == [private_rule, local_rule] and final == "direct":
+    template_name = "直连优先"
+elif final == "手动切换" and (has_rule_set_cfg or has_rule_set_rule or has_ip_cidr_rule or has_custom_group_rule):
+    template_name = "策略文件"
+
+# ---------- 出站代理 ----------
+if final == "direct":
+    outbound_status = "未开启"
+elif applied_nodes > 0:
+    outbound_status = "已开启"
+elif final:
+    outbound_status = "异常"
+else:
+    outbound_status = "未开启"
+
+# ---------- 中国流量 ----------
+cn_flow = "未配置"
+for ob in outbounds:
+    if ob.get("type") == "selector" and str(ob.get("tag", "") or "") in ("🏠 中国流量", "中国流量"):
+        cn_flow = str(ob.get("default", "") or "<空>")
+        break
+
+print(panel_status)
+print(source_summary)
+print(str(cache_nodes))
+print(str(applied_nodes))
+print(template_name)
+print(final or "<空>")
+print(outbound_status)
+print(cn_flow)
+PY
+}
+
+show_outbound_status_header() {
+  local panel_status="未启用"
+  local source_summary="0/0"
+  local cache_nodes="0"
+  local applied_nodes="0"
+  local template_name="自定义"
+  local final_outbound="<空>"
+  local outbound_status="未开启"
+  local cn_flow="未配置"
+
+  if [ -f "${CONFIG_DIR}/config.json" ] && has_cmd python3; then
+    mapfile -t _outbound_info < <(get_outbound_status_info)
+    panel_status="${_outbound_info[0]:-未启用}"
+    source_summary="${_outbound_info[1]:-0/0}"
+    cache_nodes="${_outbound_info[2]:-0}"
+    applied_nodes="${_outbound_info[3]:-0}"
+    template_name="${_outbound_info[4]:-自定义}"
+    final_outbound="${_outbound_info[5]:-<空>}"
+    outbound_status="${_outbound_info[6]:-未开启}"
+    cn_flow="${_outbound_info[7]:-未配置}"
+  fi
+
+  echo "======================================"
+  echo "              出站管理"
+  echo "======================================"
+  print_outbound_status_line "面板状态 :" "${panel_status}"   "节点源   :" "${source_summary}"
+  print_outbound_status_line "缓存节点 :" "${cache_nodes}"    "已应用   :" "${applied_nodes}"
+  print_outbound_status_line "当前模板 :" "${template_name}" "默认出口 :" "${final_outbound}"
+  print_outbound_status_line "出站代理 :" "${outbound_status}" "中国流量 :" "${cn_flow}"
+  echo "======================================"
+}
+
 menu_outbound_management() {
   while true; do
     clear
-    echo "======================================"
-    echo "              出站管理"
-    echo "======================================"
+    show_outbound_status_header
     echo "1. 节点源管理"
     echo "2. 路由策略"
     echo "3. 面板管理"
