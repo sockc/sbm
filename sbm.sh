@@ -293,7 +293,7 @@ show_header() {
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "        Sing-box Manager (sbm)")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 
-  print_status_row "脚本版本 :" "${SBM_VERSION}" "内核版本 :" "${sb_version}"
+  print_status_row "脚本版本 :" "${SBM_VERSION} " "内核版本 :" "${sb_version}"
   print_status_row "服务状态 :" "${svc_status}" "入站数量 :" "${inbound_count}" "${svc_color}" "${C_RESET}"
   print_status_row "UI状态   :" "${ui_status}  "   "本地代理 :" "${proxy_status}" "${ui_color}" "${proxy_color}"
 
@@ -333,11 +333,13 @@ show_service_status() {
 main_menu() {
   while true; do
     show_header
-    menu_row "1" "安装/升级 "    "2" "入站管理"
-    menu_row "3" "出站管理  "    "4" "本地代理(实验)"
-    menu_row "5" "防火墙管理"    "6" "备份与恢复"
-    menu_row "7" "服务状态  "    "8" "更新脚本"
-    menu_row "9" "卸载      "    "0" "退出"
+    
+    # 放弃使用原有的 menu_row，直接用带颜色的 echo 排版，彻底解决中文对齐问题
+    echo -e " ${C_BCYAN}1.${C_RESET} 安装/升级      ${C_BCYAN}2.${C_RESET} 入站管理"
+    echo -e " ${C_BCYAN}3.${C_RESET} 出站管理       ${C_BCYAN}4.${C_RESET} 本地代理(实验)"
+    echo -e " ${C_BCYAN}5.${C_RESET} 防火墙管理     ${C_BCYAN}6.${C_RESET} 备份与恢复"
+    echo -e " ${C_BCYAN}7.${C_RESET} 服务状态       ${C_BCYAN}8.${C_RESET} 更新脚本"
+    echo -e " ${C_BCYAN}9.${C_RESET} 卸载           ${C_BCYAN}0.${C_RESET} 退出"
     echo
 
     read -r -p "请选择 [0-9]: " choice
