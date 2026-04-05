@@ -5,6 +5,7 @@
       "members": [
         "direct",
         "自动选择",
+        "🏠 中国流量",
         "🇨🇳 中国节点",
         "🇭🇰 香港节点",
         "🇹🇼 台湾节点",
@@ -17,6 +18,15 @@
         "ALL_NODES"
       ],
       "default": "自动选择"
+    },
+
+    "🏠 中国流量": {
+      "type": "selector",
+      "members": [
+        "direct",
+        "🇨🇳 中国节点"
+      ],
+      "default": "direct"
     },
 
     "🌐 谷歌服务": {
@@ -319,6 +329,23 @@
       "ts.net"
     ],
 
+    "rule_sets": {
+      "geosite-cn": {
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs",
+        "download_detour": "direct",
+        "update_interval": "1d"
+      },
+      "geoip-cn": {
+        "type": "remote",
+        "format": "binary",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs",
+        "download_detour": "direct",
+        "update_interval": "1d"
+      }
+    },
+
     "route_groups": {
       "📺 YouTube": [
         "youtube.com",
@@ -400,24 +427,6 @@
         "tiktokcdn.com",
         "reddit.com",
         "redditmedia.com"
-      ],
-      "🇨🇳 中国节点": [
-        "qq.com",
-        "bilibili.com",
-        "taobao.com",
-        "jd.com",
-        "mi.com",
-        "alicdn.com",
-        "alipay.com",
-        "douyin.com",
-        "douyinpic.com",
-        "xiaohongshu.com",
-        "weixin.qq.com",
-        "qpic.cn",
-        "gtimg.com",
-        "iqiyi.com",
-        "youku.com",
-        "mgtv.com"
       ]
     },
 
@@ -434,6 +443,13 @@
         "2001:b28::/32",
         "2001:67c:4e8::/48",
         "2a0a:f280::/32"
+      ]
+    },
+
+    "route_rule_set_groups": {
+      "🏠 中国流量": [
+        "geosite-cn",
+        "geoip-cn"
       ]
     },
 
