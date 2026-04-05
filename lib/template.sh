@@ -354,12 +354,16 @@ preserved = []
 remote_tags = []
 
 has_direct = False
+has_block = False
+
 for ob in outbounds:
     tag = ob.get("tag", "")
     typ = ob.get("type", "")
 
     if tag == "direct":
         has_direct = True
+    if tag == "block" or typ == "block":
+        has_block = True
 
     if typ in ("selector", "urltest"):
         continue
@@ -371,6 +375,10 @@ for ob in outbounds:
 
 if not has_direct:
     preserved.insert(0, {"type": "direct", "tag": "direct"})
+
+if not has_block:
+    insert_pos = 1 if preserved and preserved[0].get("tag") == "direct" else 0
+    preserved.insert(insert_pos, {"type": "block", "tag": "block"})
 
 def resolve_members(members, all_nodes):
     result = []
