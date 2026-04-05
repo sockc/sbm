@@ -1652,6 +1652,95 @@ print(cn_flow)
 PY
 }
 
+outbound_value_color() {
+  local key="$1"
+  local value="$2"
+
+  case "${key}" in
+    panel)
+      case "${value}" in
+        未启用) printf "%s" "${C_YELLOW}" ;;
+        本机|局域网|公网|自定义) printf "%s" "${C_BGREEN}" ;;
+        *) printf "%s" "${C_BCYAN}" ;;
+      esac
+      ;;
+    source)
+      case "${value}" in
+        0/0) printf "%s" "${C_YELLOW}" ;;
+        */*)
+          local left="${value%/*}"
+          local right="${value#*/}"
+          if [ "${right}" = "0" ]; then
+            printf "%s" "${C_YELLOW}"
+          elif [ "${left}" = "${right}" ]; then
+            printf "%s" "${C_BGREEN}"
+          else
+            printf "%s" "${C_BYELLOW}"
+          fi
+          ;;
+        *)
+          printf "%s" "${C_BCYAN}"
+          ;;
+      esac
+      ;;
+    cache|applied)
+      case "${value}" in
+        0|""|"<空>") printf "%s" "${C_YELLOW}" ;;
+        *) printf "%s" "${C_BGREEN}" ;;
+      esac
+      ;;
+    template)
+      case "${value}" in
+        策略文件|策略文件模板) printf "%s" "${C_BGREEN}" ;;
+        最小模板|常用模板|全局代理|全局代理模板|直连优先) printf "%s" "${C_BCYAN}" ;;
+        自定义|未知|自定义/未知) printf "%s" "${C_BYELLOW}" ;;
+        *) printf "%s" "${C_BCYAN}" ;;
+      esac
+      ;;
+    final)
+      case "${value}" in
+        direct) printf "%s" "${C_YELLOW}" ;;
+        手动切换|proxy) printf "%s" "${C_BGREEN}" ;;
+        "<空>"|"") printf "%s" "${C_YELLOW}" ;;
+        *) printf "%s" "${C_BCYAN}" ;;
+      esac
+      ;;
+    outbound)
+      case "${value}" in
+        已开启) printf "%s" "${C_BGREEN}" ;;
+        未开启) printf "%s" "${C_YELLOW}" ;;
+        异常) printf "%s" "${C_BRED}" ;;
+        *) printf "%s" "${C_BCYAN}" ;;
+      esac
+      ;;
+    cnflow)
+      case "${value}" in
+        direct) printf "%s" "${C_BGREEN}" ;;
+        未配置|"<空>"|"") printf "%s" "${C_YELLOW}" ;;
+        *) printf "%s" "${C_BCYAN}" ;;
+      esac
+      ;;
+    *)
+      printf "%s" "${C_RESET}"
+      ;;
+  esac
+}
+
+print_outbound_status_line() {
+  local l1="$1" v1="$2" k1="$3"
+  local l2="$4" v2="$5" k2="$6"
+  local c1 c2
+
+  c1="$(outbound_value_color "${k1}" "${v1}")"
+  c2="$(outbound_value_color "${k2}" "${v2}")"
+
+  printf "%b%-10s%b %b%-14s%b %b%-10s%b %b%s%b\n" \
+    "${C_BCYAN}" "${l1}" "${C_RESET}" \
+    "${c1}" "${v1}" "${C_RESET}" \
+    "${C_BCYAN}" "${l2}" "${C_RESET}" \
+    "${c2}" "${v2}" "${C_RESET}"
+}
+
 show_outbound_status_header() {
   local panel_status="未启用"
   local source_summary="0/0"
@@ -1674,14 +1763,14 @@ show_outbound_status_header() {
     cn_flow="${_outbound_info[7]:-未配置}"
   fi
 
-  echo "======================================"
-  echo "              出站管理"
-  echo "======================================"
-  print_outbound_status_line "面板状态 :" "${panel_status}"   "节点源   :" "${source_summary}"
-  print_outbound_status_line "缓存节点 :" "${cache_nodes}"    "已应用   :" "${applied_nodes}"
-  print_outbound_status_line "当前模板 :" "${template_name}" "默认出口 :" "${final_outbound}"
-  print_outbound_status_line "出站代理 :" "${outbound_status}" "中国流量 :" "${cn_flow}"
-  echo "======================================"
+  echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
+  echo "$(paint "${C_BMAGENTA}${C_BOLD}" "              出站管理")"
+  echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
+  print_outbound_status_line "面板状态 :" "${panel_status}"   "panel"    "节点源   :" "${source_summary}" "source"
+  print_outbound_status_line "缓存节点 :" "${cache_nodes}"    "cache"    "已应用   :" "${applied_nodes}" "applied"
+  print_outbound_status_line "当前模板 :" "${template_name}"  "template" "默认出口 :" "${final_outbound}" "final"
+  print_outbound_status_line "出站代理 :" "${outbound_status}" "outbound" "中国流量 :" "${cn_flow}" "cnflow"
+  echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
 
 menu_outbound_management() {
