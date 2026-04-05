@@ -1108,6 +1108,240 @@ PY
   pause_enter
 }
 
+list_selector_groups() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+rows = []
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") != "selector":
+        continue
+
+    tag = str(ob.get("tag", "") or "")
+    if not tag:
+        continue
+
+    if tag in ("proxy", "direct", "block", "dns-out"):
+        continue
+
+    default = str(ob.get("default", "") or "")
+    outs = ob.get("outbounds", []) or []
+    rows.append((tag, default, len(outs)))
+
+for i, (tag, default, count) in enumerate(rows, 1):
+    print(f"{i}\t{tag}\t{default}\t{count}")
+PY
+}
+
+get_selector_tag_by_index() {
+  local idx="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") != "selector":
+        continue
+    tag = str(ob.get("tag", "") or "")
+    if not tag or tag in ("proxy", "direct", "block", "dns-out"):
+        continue
+    rows.append(tag)
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+show_selector_groups() {
+  echo "编号 策略组                   当前默认               候选数"
+  echo "--------------------------------------------------------------"
+  local found=0
+  while IFS=$'\t' read -r idx tag default count; do
+    [ -z "${idx}" ] && continue
+    found=1
+    printf '%-4s %-24s %-20s %s\n' "${idx}" "${tag}" "${default:-<空>}" "${count}"
+  done < <(list_selector_groups)
+
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无可切换策略组>"
+  fi
+  echo "--------------------------------------------------------------"
+}
+
+list_selector_candidates_by_tag() {
+  local tag="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector" and str(ob.get("tag", "") or "") == tag:
+        current = str(ob.get("default", "") or "")
+        for i, item in enumerate(ob.get("outbounds", []) or [], 1):
+            marker = "*" if item == current else " "
+            print(f"{i}\t{item}\t{marker}")
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+get_selector_candidate_by_index() {
+  local tag="$1"
+  local idx="$2"
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+idx = int(sys.argv[3])
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector" and str(ob.get("tag", "") or "") == tag:
+        outs = ob.get("outbounds", []) or []
+        if idx < 1 or idx > len(outs):
+            raise SystemExit(1)
+        print(outs[idx - 1])
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+show_selector_candidates_for_group() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  clear
+  echo "======================================"
+  echo "           查看策略组可选节点"
+  echo "======================================"
+  show_selector_groups
+  echo
+
+  local idx tag
+  idx="$(prompt_required "请输入要查看的策略组编号")"
+  tag="$(get_selector_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "策略组：${tag}"
+  echo "--------------------------------------------------------------"
+  while IFS=$'\t' read -r n item marker; do
+    [ -z "${n}" ] && continue
+    if [ "${marker}" = "*" ]; then
+      printf '%-4s %-32s %s\n' "${n}" "${item}" "<当前>"
+    else
+      printf '%-4s %s\n' "${n}" "${item}"
+    fi
+  done < <(list_selector_candidates_by_tag "${tag}")
+  echo "--------------------------------------------------------------"
+
+  pause_enter
+}
+
+switch_selector_group() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  clear
+  echo "======================================"
+  echo "             切换指定策略组"
+  echo "======================================"
+  show_selector_groups
+  echo
+
+  local idx tag candidate_idx candidate tmp_file
+  idx="$(prompt_required "请输入要切换的策略组编号")"
+  tag="$(get_selector_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "策略组：${tag}"
+  echo "--------------------------------------------------------------"
+  while IFS=$'\t' read -r n item marker; do
+    [ -z "${n}" ] && continue
+    if [ "${marker}" = "*" ]; then
+      printf '%-4s %-32s %s\n' "${n}" "${item}" "<当前>"
+    else
+      printf '%-4s %s\n' "${n}" "${item}"
+    fi
+  done < <(list_selector_candidates_by_tag "${tag}")
+  echo "--------------------------------------------------------------"
+
+  candidate_idx="$(prompt_required "请输入要切换到的节点编号")"
+  candidate="$(get_selector_candidate_by_index "${tag}" "${candidate_idx}")" || {
+    err "节点编号无效"
+    pause_enter
+    return 1
+  }
+
+  tmp_file="${TMP_DIR}/config.switch-selector.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${candidate}" <<'PY'
+import json, sys
+
+cfg_path, tag, candidate = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector" and str(ob.get("tag", "") or "") == tag:
+        outs = ob.get("outbounds", []) or []
+        if candidate not in outs:
+            raise SystemExit(1)
+        ob["default"] = candidate
+        break
+else:
+    raise SystemExit(1)
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "切换策略组失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  ok "已切换：${tag} -> ${candidate}"
+  pause_enter
+}
+
 menu_outbound_source_management() {
   while true; do
     clear
@@ -1171,24 +1405,26 @@ menu_route_policy_management() {
     echo "              路由策略"
     echo "======================================"
     echo "1. 查看当前策略状态"
-    echo "2. 切换手动切换组"
-    echo "3. 查看组可选节点"
-    echo "4. 应用预设模板"
-    echo "5. 应用策略文件"
-    echo "6. 查看策略文件"
-    echo "7. 重建策略组"
+    echo "2. 切换指定策略组"
+    echo "3. 查看指定策略组可选节点"
+    echo "4. 快速切换手动切换组"
+    echo "5. 应用预设模板"
+    echo "6. 应用策略文件"
+    echo "7. 查看策略文件"
+    echo "8. 重建策略组"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-7]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) show_template_status ;;
-      2) switch_proxy_selector ;;
-      3) show_selector_candidates; pause_enter ;;
-      4) menu_route_template_shortcuts ;;
-      5) apply_policy_groups_file ;;
-      6) show_policy_groups_file ;;
-      7) rebuild_proxy_selector_now ;;
+      2) switch_selector_group ;;
+      3) show_selector_candidates_for_group ;;
+      4) switch_proxy_selector ;;
+      5) menu_route_template_shortcuts ;;
+      6) apply_policy_groups_file ;;
+      7) show_policy_groups_file ;;
+      8) rebuild_proxy_selector_now ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
