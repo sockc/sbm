@@ -262,7 +262,7 @@ show_clash_api_status() {
   echo "UI 下载源         : ${CLASH_API_UI_URL:-默认(Yacd-meta)}"
   echo "UI 下载出口       : ${CLASH_API_UI_DETOUR:-默认出口}"
   if [ -n "${CLASH_API_SECRET}" ]; then
-    echo "API Secret        : 已设置"
+    echo "API Secret        : ${CLASH_API_SECRET}"
   else
     echo "API Secret        : 未设置"
   fi
