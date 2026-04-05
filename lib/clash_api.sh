@@ -408,7 +408,7 @@ enable_clash_api_preset() {
     return 1
   }
 
-  local preset="$1" # local / public
+  local preset="$1" # local / lan / tailscale / public
   load_clash_api_current
 
   local controller secret ui_dir ui_url ui_detour default_mode allow_origin allow_private
@@ -421,7 +421,7 @@ enable_clash_api_preset() {
 
   choose_ui_preset
 
-if [ "${preset}" = "local" ]; then
+  if [ "${preset}" = "local" ]; then
     controller="127.0.0.1:9090"
     secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
 
@@ -439,6 +439,20 @@ if [ "${preset}" = "local" ]; then
     allow_private="true"
     secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
 
+  elif [ "${preset}" = "tailscale" ]; then
+    local ts_ip
+    ts_ip="$(detect_tailscale_ip || true)"
+
+    if [ -z "${ts_ip}" ]; then
+      err "未检测到可用的 Tailscale IPv4 地址，请先确认 tailscaled 已连接"
+      pause_enter
+      return 1
+    fi
+
+    controller="${ts_ip}:9090"
+    allow_private="true"
+    secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
+
   else
     controller="0.0.0.0:9066"
     secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
@@ -448,11 +462,13 @@ if [ "${preset}" = "local" ]; then
 
   echo
   echo "========== Clash API 预览 =========="
-  if [ "${preset}" = "local" ]; then
-    echo "模式              : 本机面板"
-  else
-    echo "模式              : 公网面板"
-  fi
+  case "${preset}" in
+    local)     echo "模式              : 本机面板" ;;
+    lan)       echo "模式              : 局域网面板" ;;
+    tailscale) echo "模式              : Tailscale 面板" ;;
+    public)    echo "模式              : 公网面板" ;;
+    *)         echo "模式              : 自定义" ;;
+  esac
   echo "监听地址          : ${controller}"
   echo "UI 目录           : ${ui_dir}"
   echo "UI 预设           : ${UI_PRESET_NAME}"
@@ -837,27 +853,29 @@ menu_clash_api_management() {
     echo "======================================"
     echo "           Clash API 管理"
     echo "======================================"
-    echo "1. 一键启用本机面板"
-    echo "2. 一键启用局域网面板"
-    echo "3. 一键启用公网面板"
-    echo "4. 关闭 Clash API"
-    echo "5. 查看当前状态"
-    echo "6. 更换面板 UI"
-    echo "7. 设置 API Secret"
-    echo "8. 高级设置"
+    echo "1. 启用本机面板"
+    echo "2. 启用局域网面板"
+    echo "3. 启用 Tailscale 面板"
+    echo "4. 启用公网面板"
+    echo "5. 关闭 Clash API"
+    echo "6. 查看当前状态"
+    echo "7. 更换面板 UI"
+    echo "8. 设置 API Secret"
+    echo "9. 高级设置"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-8]: " choice
+    read -r -p "请选择 [0-9]: " choice
     case "${choice:-}" in
       1) enable_clash_api_preset "local" ;;
       2) enable_clash_api_preset "lan" ;;
-      3) enable_clash_api_preset "public" ;;
-      4) disable_clash_api ;;
-      5) show_clash_api_status ;;
-      6) change_clash_api_ui ;;
-      7) set_clash_api_secret ;;
-      8) menu_clash_api_advanced ;;
+      3) enable_clash_api_preset "tailscale" ;;
+      4) enable_clash_api_preset "public" ;;
+      5) disable_clash_api ;;
+      6) show_clash_api_status ;;
+      7) change_clash_api_ui ;;
+      8) set_clash_api_secret ;;
+      9) menu_clash_api_advanced ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
