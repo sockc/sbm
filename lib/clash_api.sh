@@ -305,14 +305,24 @@ auto_sync_sources_after_clash_api_enable() {
     return 0
   fi
 
-  if ! declare -F show_outbound_sources >/dev/null 2>&1; then
-    warn "未找到 show_outbound_sources，跳过自动同步节点源"
-    return 0
+  local has_sources="false"
+
+  # 优先检查 sources 目录里是否已有节点源文件
+  if [ -d "${CONFIG_DIR}/sources" ] && find "${CONFIG_DIR}/sources" -maxdepth 1 -type f | grep -q .; then
+    has_sources="true"
   fi
 
-  # 粗略判断是否已有节点源
-  if ! show_outbound_sources 2>/dev/null | grep -qv '<暂无节点源>'; then
-    warn "当前没有可用节点源，已跳过自动同步"
+  # 再兼容一些脚本把节点源放在单独目录/缓存目录的情况
+  if [ "${has_sources}" != "true" ] && [ -d "${BASE_DIR}/sources" ] && find "${BASE_DIR}/sources" -maxdepth 1 -type f | grep -q .; then
+    has_sources="true"
+  fi
+
+  if [ "${has_sources}" != "true" ] && [ -d "${CONFIG_DIR}/node-cache" ] && find "${CONFIG_DIR}/node-cache" -maxdepth 1 -type f | grep -q .; then
+    has_sources="true"
+  fi
+
+  if [ "${has_sources}" != "true" ]; then
+    warn "当前没有检测到节点源文件，已跳过自动同步"
     return 0
   fi
 
