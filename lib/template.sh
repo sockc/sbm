@@ -242,6 +242,8 @@ def normalize_rules(rules):
             item["ip_is_private"] = True
         if "domain_suffix" in r:
             item["domain_suffix"] = sorted(r.get("domain_suffix", []))
+        if "ip_cidr" in r:
+            item["ip_cidr"] = sorted(r.get("ip_cidr", []))
         item["action"] = r.get("action", "")
         item["outbound"] = r.get("outbound", "")
         result.append(item)
@@ -300,7 +302,7 @@ if cn_selector:
     print(f"中国节点 默认   : {cn_selector.get('default', '<空>')}")
     print(f"中国节点 成员   : {', '.join(cn_selector.get('outbounds', [])) or '<空>'}")
 else:
-    print("中国节点 状态   : 未找到"))
+    print("中国节点 状态   : 未找到")
 
 print(f"规则数量        : {len(rules)}")
 print("规则摘要        :")
@@ -315,6 +317,9 @@ else:
         ds = r.get("domain_suffix", [])
         if ds:
             parts.append("domain_suffix=" + ",".join(ds))
+        cidr = r.get("ip_cidr", [])
+        if cidr:
+            parts.append("ip_cidr=" + ",".join(cidr))
         cond = " ; ".join(parts) if parts else "custom"
         print(f"  {i}. {cond} -> {r.get('outbound', '')}")
 PY
@@ -348,8 +353,8 @@ outbounds = cfg.setdefault("outbounds", [])
 route = cfg.setdefault("route", {})
 
 REMOTE_TYPES = {
-    "socks","http","shadowsocks","vmess","trojan","wireguard","hysteria",
-    "vless","shadowtls","tuic","hysteria2","anytls","tor","ssh","naive"
+    "socks", "http", "shadowsocks", "vmess", "trojan", "wireguard", "hysteria",
+    "vless", "shadowtls", "tuic", "hysteria2", "anytls", "tor", "ssh", "naive"
 }
 RESERVED = {"direct", "block", "dns-out"}
 
@@ -455,6 +460,14 @@ for outbound_tag, suffixes in rules_cfg.get("route_groups", {}).items():
     if suffixes:
         rules.append({
             "domain_suffix": suffixes,
+            "action": "route",
+            "outbound": outbound_tag
+        })
+
+for outbound_tag, cidrs in rules_cfg.get("route_ip_cidr_groups", {}).items():
+    if cidrs:
+        rules.append({
+            "ip_cidr": cidrs,
             "action": "route",
             "outbound": outbound_tag
         })
