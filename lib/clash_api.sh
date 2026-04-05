@@ -421,9 +421,24 @@ enable_clash_api_preset() {
 
   choose_ui_preset
 
-  if [ "${preset}" = "local" ]; then
+if [ "${preset}" = "local" ]; then
     controller="127.0.0.1:9090"
     secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
+
+  elif [ "${preset}" = "lan" ]; then
+    local lan_ip
+    lan_ip="$(detect_lan_ip || true)"
+
+    if [ -z "${lan_ip}" ]; then
+      err "未检测到可用局域网 IP，请改用公网模式或手动设置监听地址"
+      pause_enter
+      return 1
+    fi
+
+    controller="${lan_ip}:9090"
+    allow_private="true"
+    secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
+
   else
     controller="0.0.0.0:9066"
     secret="${CLASH_API_SECRET:-$(gen_api_secret)}"
@@ -823,24 +838,26 @@ menu_clash_api_management() {
     echo "           Clash API 管理"
     echo "======================================"
     echo "1. 一键启用本机面板"
-    echo "2. 一键启用公网面板"
-    echo "3. 关闭 Clash API"
-    echo "4. 查看当前状态"
-    echo "5. 更换面板 UI"
-    echo "6. 设置 API Secret"
-    echo "7. 高级设置"
+    echo "2. 一键启用局域网面板"
+    echo "3. 一键启用公网面板"
+    echo "4. 关闭 Clash API"
+    echo "5. 查看当前状态"
+    echo "6. 更换面板 UI"
+    echo "7. 设置 API Secret"
+    echo "8. 高级设置"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-7]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) enable_clash_api_preset "local" ;;
-      2) enable_clash_api_preset "public" ;;
-      3) disable_clash_api ;;
-      4) show_clash_api_status ;;
-      5) change_clash_api_ui ;;
-      6) set_clash_api_secret ;;
-      7) menu_clash_api_advanced ;;
+      2) enable_clash_api_preset "lan" ;;
+      3) enable_clash_api_preset "public" ;;
+      4) disable_clash_api ;;
+      5) show_clash_api_status ;;
+      6) change_clash_api_ui ;;
+      7) set_clash_api_secret ;;
+      8) menu_clash_api_advanced ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
