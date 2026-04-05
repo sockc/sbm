@@ -36,3 +36,42 @@ fetch_to_file() {
     return 1
   fi
 }
+
+detect_lan_ip() {
+  local ip_addr=""
+
+  if has_cmd ip; then
+    ip_addr="$(
+      ip -4 -o addr show up scope global 2>/dev/null \
+      | awk '{print $4}' \
+      | cut -d/ -f1 \
+      | awk '
+          /^10\./ {print; exit}
+          /^192\.168\./ {print; exit}
+          /^172\.(1[6-9]|2[0-9]|3[0-1])\./ {print; exit}
+        '
+    )"
+    if [ -n "${ip_addr}" ]; then
+      printf '%s\n' "${ip_addr}"
+      return 0
+    fi
+  fi
+
+  if has_cmd hostname; then
+    ip_addr="$(
+      hostname -I 2>/dev/null \
+      | tr ' ' '\n' \
+      | awk '
+          /^10\./ {print; exit}
+          /^192\.168\./ {print; exit}
+          /^172\.(1[6-9]|2[0-9]|3[0-1])\./ {print; exit}
+        '
+    )"
+    if [ -n "${ip_addr}" ]; then
+      printf '%s\n' "${ip_addr}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
