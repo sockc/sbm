@@ -2306,24 +2306,24 @@ menu_inbound_management() {
     echo "======================================"
     echo "              入站管理"
     echo "======================================"
-    echo "1. 部署/重装 VLESS"
-    echo "2. 部署/重装 Hysteria2"
-    echo "3. 部署/重装 VMess"
-    echo "4. 部署/重装 TUIC"
-    echo "5. 部署/重装 AnyTLS"
-    echo "6. 查看当前入站实例"
-    echo "7. 删除指定入站实例"
-    echo "8. 导出客户端配置"
+    echo "1. 部署 VLESS"
+    echo "2. 部署 VMess"
+    echo "3. 部署 AnyTLS"
+    echo "4. 部署 TUIC"
+    echo "5. 部署 Hysteria2"
+    echo "6. 查看入站实例"
+    echo "7. 删除入站实例"
+    echo "8. 导出配置"
     echo "0. 返回"
     echo
 
     read -r -p "请选择 [0-8]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless ;;
-      2) menu_deploy_hysteria2 ;;
-      3) menu_deploy_vmess ;;
+      2) menu_deploy_vmess ;;
+      3) menu_deploy_anytls ;;
       4) menu_deploy_tuic ;;
-      5) menu_deploy_anytls ;;
+      5) menu_deploy_hysteria2 ;;
       6) show_current_inbounds ;;
       7) delete_inbound_instance ;;
       8) menu_export_client ;;
