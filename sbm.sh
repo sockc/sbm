@@ -294,9 +294,9 @@ show_header() {
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 
 # 把 32 改成了 26，缩小中间的间距
-  echo -e " ${C_BCYAN}脚本版本 :${C_RESET} ${C_BMAGENTA}${SBM_VERSION}${C_RESET}\033[26G${C_BCYAN}内核版本 :${C_RESET} ${sb_version}"
-  echo -e " ${C_BCYAN}服务状态 :${C_RESET} ${svc_color}${svc_status}${C_RESET}\033[26G${C_BCYAN}入站数量 :${C_RESET} ${inbound_count}"
-  echo -e " ${C_BCYAN}UI状态   :${C_RESET} ${ui_color}${ui_status}${C_RESET}\033[26G${C_BCYAN}本地代理 :${C_RESET} ${proxy_color}${proxy_status}${C_RESET}"
+  echo -e " ${C_BCYAN}脚本版本 :${C_RESET} ${C_BMAGENTA}${SBM_VERSION}${C_RESET}\033[24G${C_BCYAN}内核版本 :${C_RESET} ${sb_version}"
+  echo -e " ${C_BCYAN}服务状态 :${C_RESET} ${svc_color}${svc_status}${C_RESET}\033[24G${C_BCYAN}入站数量 :${C_RESET} ${inbound_count}"
+  echo -e " ${C_BCYAN}UI状态   :${C_RESET} ${ui_color}${ui_status}${C_RESET}\033[24G${C_BCYAN}本地代理 :${C_RESET} ${proxy_color}${proxy_status}${C_RESET}"
 
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
