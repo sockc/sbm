@@ -223,6 +223,49 @@ PY
   return 0
 }
 
+detect_clash_api_mode() {
+  local controller="$1"
+
+  python3 - "${controller}" <<'PY'
+import sys, ipaddress
+
+controller = (sys.argv[1] or "").strip()
+if not controller:
+    print("未启用")
+    raise SystemExit(0)
+
+host = controller
+if controller.startswith("[") and "]:" in controller:
+    host = controller.rsplit(":", 1)[0]
+elif ":" in controller:
+    host = controller.rsplit(":", 1)[0]
+
+host = host.strip("[]").strip()
+
+if host in ("127.0.0.1", "localhost", "::1"):
+    print("本机面板")
+    raise SystemExit(0)
+
+if host in ("0.0.0.0", "::"):
+    print("公网面板")
+    raise SystemExit(0)
+
+try:
+    ip = ipaddress.ip_address(host)
+
+    if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
+        print("Tailscale 面板")
+    elif ip.version == 6 and ip in ipaddress.ip_network("fd7a:115c:a1e0::/48"):
+        print("Tailscale 面板")
+    elif ip.is_private:
+        print("局域网面板")
+    else:
+        print("自定义/公网")
+except Exception:
+    print("自定义")
+PY
+}
+
 show_clash_api_status() {
   require_clash_api_env || {
     pause_enter
@@ -255,40 +298,46 @@ show_clash_api_status() {
       ;;
   esac
 
+  local panel_mode
+  panel_mode="$(detect_clash_api_mode "${CLASH_API_CONTROLLER}")"
+
   echo "状态              : 已开启"
+  echo "面板模式          : ${panel_mode}"
   echo "监听地址          : ${CLASH_API_CONTROLLER:-<空>}"
   echo "UI 目录           : ${CLASH_API_UI_DIR:-<空>}"
   echo "UI 预设           : ${ui_name}"
   echo "UI 下载源         : ${CLASH_API_UI_URL:-默认(Yacd-meta)}"
   echo "UI 下载出口       : ${CLASH_API_UI_DETOUR:-默认出口}"
+
   if [ -n "${CLASH_API_SECRET}" ]; then
     echo "API Secret        : ${CLASH_API_SECRET}"
   else
     echo "API Secret        : 未设置"
   fi
+
   echo "默认模式          : ${CLASH_API_DEFAULT_MODE:-Rule}"
   echo "CORS 允许来源     : ${CLASH_API_ALLOW_ORIGIN:-*}"
   echo "允许私网访问      : ${CLASH_API_ALLOW_PRIVATE:-false}"
 
-if [ -n "${CLASH_API_CONTROLLER}" ]; then
-  local ctrl_host port
-  ctrl_host="${CLASH_API_CONTROLLER%:*}"
-  port="$(controller_port "${CLASH_API_CONTROLLER}")"
+  if [ -n "${CLASH_API_CONTROLLER}" ]; then
+    local ctrl_host port
+    ctrl_host="${CLASH_API_CONTROLLER%:*}"
+    port="$(controller_port "${CLASH_API_CONTROLLER}")"
 
-  if [ -n "${port}" ]; then
-    case "${ctrl_host}" in
-      127.0.0.1|localhost|::1|\[::1\])
-        echo "UI 地址           : http://127.0.0.1:${port}/ui/"
-        ;;
-      0.0.0.0|::|\[::\])
-        echo "UI 地址           : http://服务器IP:${port}/ui/"
-        ;;
-      *)
-        echo "UI 地址           : http://${ctrl_host}:${port}/ui/"
-        ;;
-    esac
+    if [ -n "${port}" ]; then
+      case "${ctrl_host}" in
+        127.0.0.1|localhost|::1|\[::1\])
+          echo "UI 地址           : http://127.0.0.1:${port}/ui/"
+          ;;
+        0.0.0.0|::|\[::\])
+          echo "UI 地址           : http://服务器IP:${port}/ui/"
+          ;;
+        *)
+          echo "UI 地址           : http://${ctrl_host}:${port}/ui/"
+          ;;
+      esac
+    fi
   fi
-fi
 
   echo "======================================"
   pause_enter
