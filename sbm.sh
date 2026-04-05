@@ -293,9 +293,9 @@ show_header() {
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "        Sing-box Manager (sbm)")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 
-  print_status_row "脚本版本 :" "${SBM_VERSION} " "内核版本 :" "${sb_version}"
-  print_status_row "服务状态 :" "${svc_status}" "入站数量 :" "${inbound_count}" "${svc_color}" "${C_RESET}"
-  print_status_row "UI状态   :" "${ui_status}  "   "本地代理 :" "${proxy_status}" "${ui_color}" "${proxy_color}"
+  echo -e " ${C_BCYAN}脚本版本 :${C_RESET} ${C_BMAGENTA}${SBM_VERSION}${C_RESET}\033[32G${C_BCYAN}内核版本 :${C_RESET} ${sb_version}"
+  echo -e " ${C_BCYAN}服务状态 :${C_RESET} ${svc_color}${svc_status}${C_RESET}\033[32G${C_BCYAN}入站数量 :${C_RESET} ${inbound_count}"
+  echo -e " ${C_BCYAN}UI状态   :${C_RESET} ${ui_color}${ui_status}${C_RESET}\033[32G${C_BCYAN}本地代理 :${C_RESET} ${proxy_color}${proxy_status}${C_RESET}"
 
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
