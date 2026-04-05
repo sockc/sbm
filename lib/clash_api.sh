@@ -349,6 +349,34 @@ enable_clash_api_preset() {
     return 1
   }
 
+  auto_apply_policy_file_after_clash_api_enable() {
+  if [ -z "${POLICY_GROUPS_FILE:-}" ]; then
+    warn "未定义 POLICY_GROUPS_FILE，跳过自动应用策略文件"
+    return 0
+  fi
+
+  if [ ! -f "${POLICY_GROUPS_FILE}" ]; then
+    warn "未找到策略文件，跳过自动应用：${POLICY_GROUPS_FILE}"
+    return 0
+  fi
+
+  if ! declare -F apply_policy_groups_file_silent >/dev/null 2>&1; then
+    warn "未找到 apply_policy_groups_file_silent，跳过自动应用策略文件"
+    return 0
+  fi
+
+  echo
+  echo "正在自动应用策略文件..."
+
+  if ! apply_policy_groups_file_silent; then
+    warn "策略文件应用失败，但面板已成功启用"
+    return 0
+  fi
+
+  ok "策略文件已自动应用"
+  return 0
+}
+
   local preset="$1" # local / public
   load_clash_api_current
 
@@ -401,6 +429,7 @@ enable_clash_api_preset() {
   fi
 
   auto_sync_sources_after_clash_api_enable || true
+  auto_apply_policy_file_after_clash_api_enable || true
 
   if [ "${preset}" = "public" ]; then
     local port backend
