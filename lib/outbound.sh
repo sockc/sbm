@@ -920,6 +920,130 @@ PY
   show_current_proxy_selection
 }
 
+menu_route_policy_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              路由策略"
+    echo "======================================"
+    echo "1. 查看当前策略状态"
+    echo "2. 切换手动切换组"
+    echo "3. 查看组可选节点"
+    echo "4. 应用预设模板"
+    echo "5. 应用策略文件"
+    echo "6. 查看策略文件"
+    echo "7. 重建策略组"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-7]: " choice
+    case "${choice:-}" in
+      1) show_template_status ;;
+      2) switch_proxy_selector ;;
+      3) show_selector_candidates; pause_enter ;;
+      4) menu_route_template_shortcuts ;;
+      5) apply_policy_groups_file ;;
+      6) show_policy_groups_file ;;
+      7) rebuild_proxy_selector_now ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_route_template_shortcuts() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              预设模板"
+    echo "======================================"
+    echo "1. 最小模板"
+    echo "2. 常用模板"
+    echo "3. 全局代理模板"
+    echo "4. 直连优先模板"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) apply_template_minimal ;;
+      2) apply_template_common ;;
+      3) apply_template_global ;;
+      4) apply_template_direct_first ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+disable_outbound_proxy() {
+  need_root
+
+  if ! require_config_file; then
+    pause_enter
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.disable-outbound.json"
+  mkdir -p "${TMP_DIR}"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+cfg = json.load(open(path, 'r', encoding='utf-8'))
+
+route = cfg.setdefault("route", {})
+
+# 关闭出站代理：默认直连
+route["final"] = "direct"
+
+# 尽量把所有 selector 默认值切回 direct，避免命中分组后还继续代理
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector":
+        outs = ob.get("outbounds", [])
+        if "direct" in outs:
+            ob["default"] = "direct"
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "关闭出站代理失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  echo "将执行以下操作："
+  echo "1. route.final 改为 direct"
+  echo "2. 所有 selector 组默认值尽量切到 direct"
+  echo
+  if ! confirm_default_yes "确认关闭出站代理吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  ok "已关闭出站代理，当前默认直连"
+  pause_enter
+}
+
 menu_outbound_management() {
   while true; do
     clear
@@ -927,78 +1051,18 @@ menu_outbound_management() {
     echo "              出站管理"
     echo "======================================"
     echo "1. 节点源管理"
-    echo "2. 策略组管理"
+    echo "2. 路由策略"
     echo "3. 面板管理"
-    echo "4. 分流模板"
+    echo "4. 关闭出站代理"
     echo "0. 返回"
     echo
 
     read -r -p "请选择 [0-4]: " choice
     case "${choice:-}" in
       1) menu_outbound_source_management ;;
-      2) menu_outbound_selector_management ;;
+      2) menu_route_policy_management ;;
       3) menu_clash_api_management ;;
-      4) menu_template_management ;;
-      0) return ;;
-      *) echo "无效选项"; sleep 1 ;;
-    esac
-  done
-}
-
-menu_outbound_source_management() {
-  while true; do
-    clear
-    echo "======================================"
-    echo "             节点源管理"
-    echo "======================================"
-    echo "1. 添加订阅 URL 源"
-    echo "2. 导入本地 sing-box 文件"
-    echo "3. 查看节点源"
-    echo "4. 更新指定节点源"
-    echo "5. 更新全部节点源"
-    echo "6. 预览导入节点"
-    echo "7. 应用指定节点源到当前策略组"
-    echo "8. 应用全部节点源到当前策略组"
-    echo "9. 删除节点源"
-    echo "0. 返回"
-    echo
-
-    read -r -p "请选择 [0-9]: " choice
-    case "${choice:-}" in
-      1) add_subscription_url_source ;;
-      2) import_local_singbox_file_source ;;
-      3) show_outbound_sources; pause_enter ;;
-      4) update_one_source ;;
-      5) update_all_sources ;;
-      6) preview_source_nodes ;;
-      7) apply_one_source_to_runtime ;;
-      8) apply_all_sources_to_runtime ;;
-      9) delete_source ;;
-      0) return ;;
-      *) echo "无效选项"; sleep 1 ;;
-    esac
-  done
-}
-
-menu_outbound_selector_management() {
-  while true; do
-    clear
-    echo "======================================"
-    echo "             策略组管理"
-    echo "======================================"
-    echo "1. 查看当前已应用节点"
-    echo "2. 查看当前手动切换组选择"
-    echo "3. 切换手动切换组到指定节点"
-    echo "4. 查看手动切换组可选节点"
-    echo "0. 返回"
-    echo
-
-    read -r -p "请选择 [0-4]: " choice
-    case "${choice:-}" in
-      1) show_current_applied_nodes ;;
-      2) show_current_proxy_selection ;;
-      3) switch_proxy_selector ;;
-      4) show_selector_candidates; pause_enter ;;
+      4) disable_outbound_proxy ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
