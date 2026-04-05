@@ -334,7 +334,7 @@ main_menu() {
   while true; do
     show_header
     menu_row "1" "安装/升级"    "2" "入站管理"
-    menu_row "3" "出站管理"     "4" "本地代理"
+    menu_row "3" "出站管理"     "4" "本地代理(实验）"
     menu_row "5" "防火墙管理"     "6" "备份与恢复"
     menu_row "7" "服务状态"     "8" "更新脚本"
     menu_row "9" "卸载"     "0" "退出"
