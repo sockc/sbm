@@ -1108,6 +1108,41 @@ PY
   pause_enter
 }
 
+menu_outbound_source_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             节点源管理"
+    echo "======================================"
+    echo "1. 添加订阅 URL 源"
+    echo "2. 导入本地 sing-box 文件"
+    echo "3. 查看节点源"
+    echo "4. 更新指定节点源"
+    echo "5. 更新全部节点源"
+    echo "6. 预览导入节点"
+    echo "7. 应用指定节点源到当前策略组"
+    echo "8. 应用全部节点源到当前策略组"
+    echo "9. 删除节点源"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-9]: " choice
+    case "${choice:-}" in
+      1) add_subscription_url_source ;;
+      2) import_local_singbox_file_source ;;
+      3) show_outbound_sources; pause_enter ;;
+      4) update_one_source ;;
+      5) update_all_sources ;;
+      6) preview_source_nodes ;;
+      7) apply_one_source_to_runtime ;;
+      8) apply_all_sources_to_runtime ;;
+      9) delete_source ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
 menu_outbound_proxy_switch() {
   while true; do
     clear
