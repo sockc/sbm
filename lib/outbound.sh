@@ -398,15 +398,39 @@ PY
   pause_enter
 }
 
-apply_cache_files_to_runtime() {
+collect_all_source_cache_files() {
   require_outbound_manage_env || return 1
-  need_root
 
-  local tmp_file
-  tmp_file="${TMP_DIR}/config.apply-nodes.json"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
+    mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
+    local source_id="${_src_meta[0]:-}"
+    local cache_file="${NODE_CACHE_DIR}/${source_id}.outbounds.json"
+    [ -f "${cache_file}" ] && printf '%s\n' "${cache_file}"
+  done < <(list_source_meta_files)
+}
 
-  if ! python3 - "${tmp_file}" "$@" <<'PY'
+update_all_sources_silent() {
+  require_outbound_manage_env || return 1
+
+  local total=0 ok_count=0
+  while IFS= read -r meta_path; do
+    [ -z "${meta_path}" ] && continue
+    total=$((total + 1))
+    if update_source_from_meta_path "${meta_path}"; then
+      ok_count=$((ok_count + 1))
+    fi
+  done < <(list_source_meta_files)
+
+  [ "${total}" -gt 0 ] || return 0
+  [ "${ok_count}" -eq "${total}" ]
+}
+
+apply_cache_files_to_runtime_file() {
+  local target_config="$1"
+  shift
+
+  python3 - "${target_config}" "$@" <<'PY'
 import copy, json, re, sys
 
 config_path = sys.argv[1]
@@ -433,10 +457,6 @@ REMOTE_TYPES = {
     "naive",
 }
 
-def is_generated_node(ob):
-    tag = ob.get("tag", "")
-    return re.fullmatch(r"node-\d+", tag or "") is not None
-
 def is_generated_group(ob):
     typ = ob.get("type", "")
     return typ in ("selector", "urltest")
@@ -451,12 +471,9 @@ for ob in outbounds:
     if tag == "direct":
         has_direct = True
 
-    # 旧的自动生成策略组不要保留，后面重建
     if is_generated_group(ob):
         continue
 
-    # 关键修复：所有旧的远程节点都不保留
-    # 这样重新应用时就不会叠加出 -2 / -3 / -4
     if typ in REMOTE_TYPES:
         continue
 
@@ -549,11 +566,18 @@ cfg.setdefault("route", {})["final"] = "手动切换"
 
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-print(len(imported))
-print(len(node_tags))
 PY
-  then
+}
+
+apply_cache_files_to_runtime() {
+  require_outbound_manage_env || return 1
+  need_root
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.apply-nodes.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! apply_cache_files_to_runtime_file "${tmp_file}" "$@"; then
     err "应用节点到策略组失败"
     pause_enter
     return 1
