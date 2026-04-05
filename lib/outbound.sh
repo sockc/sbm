@@ -439,13 +439,11 @@ def is_generated_node(ob):
 
 def is_generated_group(ob):
     typ = ob.get("type", "")
-    # 只要是策略组类出站，都在“应用节点到当前策略组”时重建
     return typ in ("selector", "urltest")
 
 preserved = []
-existing_remote_tags = []
-
 has_direct = False
+
 for ob in outbounds:
     tag = ob.get("tag", "")
     typ = ob.get("type", "")
@@ -453,13 +451,16 @@ for ob in outbounds:
     if tag == "direct":
         has_direct = True
 
-    if is_generated_node(ob) or is_generated_group(ob):
+    # 旧的自动生成策略组不要保留，后面重建
+    if is_generated_group(ob):
+        continue
+
+    # 关键修复：所有旧的远程节点都不保留
+    # 这样重新应用时就不会叠加出 -2 / -3 / -4
+    if typ in REMOTE_TYPES:
         continue
 
     preserved.append(ob)
-
-    if typ in REMOTE_TYPES and tag:
-        existing_remote_tags.append(tag)
 
 if not has_direct:
     preserved.insert(0, {"type": "direct", "tag": "direct"})
@@ -496,13 +497,16 @@ for ob in preserved:
 
 imported = []
 counter = 1
+
 for cache_path in cache_files:
     items = json.load(open(cache_path, 'r', encoding='utf-8'))
     if not isinstance(items, list):
         continue
+
     for item in items:
         if not isinstance(item, dict):
             continue
+
         typ = item.get("type", "")
         if typ not in REMOTE_TYPES:
             continue
@@ -515,22 +519,18 @@ for cache_path in cache_files:
         counter += 1
 
 node_tags = [ob["tag"] for ob in imported]
-all_candidate_tags = []
-for tag in existing_remote_tags + node_tags:
-    if tag not in all_candidate_tags:
-        all_candidate_tags.append(tag)
 
 new_outbounds = preserved + imported
 
-if all_candidate_tags:
+if node_tags:
     new_outbounds.append({
         "type": "urltest",
         "tag": "自动选择",
-        "outbounds": all_candidate_tags,
+        "outbounds": node_tags,
         "interrupt_exist_connections": False
     })
 
-    selector_members = ["direct", "自动选择"] + all_candidate_tags
+    selector_members = ["direct", "自动选择"] + node_tags
     selector_default = "自动选择"
 else:
     selector_members = ["direct"]
@@ -551,7 +551,7 @@ with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 print(len(imported))
-print(len(all_candidate_tags))
+print(len(node_tags))
 PY
   then
     err "应用节点到策略组失败"
