@@ -328,15 +328,183 @@ PY
   pause_enter
 }
 
-apply_policy_groups_file() {
+apply_policy_groups_file_silent() {
   need_root
   require_template_env || return 1
 
   if [ ! -f "${POLICY_GROUPS_FILE}" ]; then
     err "未找到策略文件：${POLICY_GROUPS_FILE}"
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.policy-groups.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${POLICY_GROUPS_FILE}" <<'PY'
+import json, sys
+
+config_path, policy_path = sys.argv[1], sys.argv[2]
+cfg = json.load(open(config_path, 'r', encoding='utf-8'))
+policy = json.load(open(policy_path, 'r', encoding='utf-8'))
+
+outbounds = cfg.setdefault("outbounds", [])
+route = cfg.setdefault("route", {})
+
+REMOTE_TYPES = {
+    "socks", "http", "shadowsocks", "vmess", "trojan", "wireguard", "hysteria",
+    "vless", "shadowtls", "tuic", "hysteria2", "anytls", "tor", "ssh", "naive"
+}
+RESERVED = {"direct", "block", "dns-out"}
+
+preserved = []
+remote_tags = []
+
+has_direct = False
+for ob in outbounds:
+    tag = ob.get("tag", "")
+    typ = ob.get("type", "")
+
+    if tag == "direct":
+        has_direct = True
+
+    if typ in ("selector", "urltest"):
+        continue
+
+    preserved.append(ob)
+
+    if typ in REMOTE_TYPES and tag and tag not in RESERVED:
+        remote_tags.append(tag)
+
+if not has_direct:
+    preserved.insert(0, {"type": "direct", "tag": "direct"})
+
+def resolve_members(members, all_nodes):
+    result = []
+    for item in members:
+        if item == "ALL_NODES":
+            for tag in all_nodes:
+                if tag not in result:
+                    result.append(tag)
+        elif item.startswith("MATCH:"):
+            needle = item.split(":", 1)[1]
+            for tag in all_nodes:
+                if needle in tag and tag not in result:
+                    result.append(tag)
+        else:
+            if item == "自动选择" and not all_nodes:
+                continue
+            if item not in result:
+                result.append(item)
+    return result
+
+generated = []
+
+if remote_tags:
+    generated.append({
+        "type": "urltest",
+        "tag": "自动选择",
+        "outbounds": remote_tags,
+        "interrupt_exist_connections": False
+    })
+
+groups = policy.get("groups", {})
+
+for group_name, group_cfg in groups.items():
+    gtype = group_cfg.get("type", "selector")
+    members = resolve_members(group_cfg.get("members", []), remote_tags)
+
+    if not remote_tags:
+        members = [m for m in members if m != "自动选择"]
+
+    if not members:
+        members = ["direct"]
+
+    obj = {
+        "type": gtype,
+        "tag": group_name,
+        "outbounds": members,
+        "interrupt_exist_connections": False
+    }
+
+    default = group_cfg.get("default", "")
+    if gtype == "selector":
+        obj["default"] = default if default in members else members[0]
+
+    generated.append(obj)
+
+cfg["outbounds"] = preserved + generated
+
+rules_cfg = policy.get("rules", {})
+
+private_rule = {
+    "ip_is_private": True,
+    "action": "route",
+    "outbound": "direct"
+}
+
+rules = [private_rule]
+
+direct_suffix = rules_cfg.get("direct_domain_suffix", [])
+if direct_suffix:
+    rules.append({
+        "domain_suffix": direct_suffix,
+        "action": "route",
+        "outbound": "direct"
+    })
+
+for outbound_tag, suffixes in rules_cfg.get("route_groups", {}).items():
+    if suffixes:
+        rules.append({
+            "domain_suffix": suffixes,
+            "action": "route",
+            "outbound": outbound_tag
+        })
+
+for outbound_tag, cidrs in rules_cfg.get("route_ip_cidr_groups", {}).items():
+    if cidrs:
+        rules.append({
+            "ip_cidr": cidrs,
+            "action": "route",
+            "outbound": outbound_tag
+        })
+
+route["rules"] = rules
+route["final"] = rules_cfg.get("final", "手动切换")
+
+with open(config_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "根据策略文件生成配置失败"
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    return 1
+  fi
+
+  return 0
+}
+
+apply_policy_groups_file() {
+  if apply_policy_groups_file_silent; then
+    ok "策略文件已应用"
+  else
     pause_enter
     return 1
   fi
+
+  pause_enter
+}
 
   local tmp_file
   tmp_file="${TMP_DIR}/config.policy-groups.json"
