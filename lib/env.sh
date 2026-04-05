@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-SBM_VERSION="0.2.2.4"
+SBM_VERSION="0.2.2.5"
 DEFAULT_SINGBOX_VERSION="1.13.3"
 
 PROJECT_NAME="sbm"
