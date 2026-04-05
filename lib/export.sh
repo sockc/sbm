@@ -938,35 +938,109 @@ PY
   pause_enter
 }
 
+export_all_uris() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  ensure_inbound_meta_dir
+
+  local found=0
+  local meta_file proto tag uri
+
+  echo "======================================"
+  echo "              全部 URI"
+  echo "======================================"
+  echo
+
+  while IFS= read -r meta_file; do
+    [ -z "${meta_file}" ] && continue
+    [ ! -f "${meta_file}" ] && continue
+
+    proto="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+    print(data.get("protocol", ""))
+except Exception:
+    print("")
+PY
+)"
+    tag="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+    print(data.get("tag", ""))
+except Exception:
+    print("")
+PY
+)"
+
+    case "${proto}" in
+      vless|vless-reality)
+        uri="$(build_vless_uri_from_meta "${meta_file}" "" "" 2>/dev/null || true)"
+        ;;
+      hysteria2)
+        uri="$(build_hy2_uri "${meta_file}" 2>/dev/null || true)"
+        ;;
+      vmess)
+        uri="$(build_vmess_uri "${meta_file}" 2>/dev/null || true)"
+        ;;
+      tuic)
+        uri="$(build_tuic_uri "${meta_file}" 2>/dev/null || true)"
+        ;;
+      *)
+        uri=""
+        ;;
+    esac
+
+    if [ -n "${uri}" ]; then
+      found=1
+      echo "【${tag:-未命名实例}】"
+      echo "${uri}"
+      echo
+    fi
+  done < <(find "${INBOUND_META_DIR}" -maxdepth 1 -type f -name '*.json' | sort)
+
+  if [ "${found}" -eq 0 ]; then
+    warn "未找到可导出的 URI"
+  fi
+
+  pause_enter
+}
+
 menu_export_client() {
   while true; do
     clear
     echo "======================================"
     echo "            导出客户端配置"
     echo "======================================"
-    echo "1. 导出单个用户 VLESS URI"
-    echo "2. 导出指定 VLESS 实例全部用户 URI"
-    echo "3. 导出 Hysteria2 URI"
-    echo "4. 导出 Hysteria2 sing-box JSON"
-    echo "5. 导出 VMess URI"
-    echo "6. 导出 VMess sing-box JSON"
-    echo "7. 导出 TUIC URI"
-    echo "8. 导出 TUIC sing-box JSON"
-    echo "9. 导出 AnyTLS sing-box JSON"
+    echo "1. 导出全部 URI"
+    echo "2. 导出单个用户 VLESS URI"
+    echo "3. 导出指定 VLESS 实例全部用户 URI"
+    echo "4. 导出 Hysteria2 URI"
+    echo "5. 导出 Hysteria2 sing-box JSON"
+    echo "6. 导出 VMess URI"
+    echo "7. 导出 VMess sing-box JSON"
+    echo "8. 导出 TUIC URI"
+    echo "9. 导出 TUIC sing-box JSON"
+    echo "10. 导出 AnyTLS sing-box JSON"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-9]: " choice
+    read -r -p "请选择 [0-10]: " choice
     case "${choice:-}" in
-      1) export_single_user_uri ;;
-      2) export_all_user_uris ;;
-      3) export_hy2_uri ;;
-      4) export_hy2_singbox_json ;;
-      5) export_vmess_uri ;;
-      6) export_vmess_singbox_json ;;
-      7) export_tuic_uri ;;
-      8) export_tuic_singbox_json ;;
-      9) export_anytls_singbox_json ;;
+      1) export_all_uris ;;
+      2) export_one_vless_user_uri ;;
+      3) export_all_vless_user_uris_by_instance ;;
+      4) export_hy2_uri ;;
+      5) export_hy2_singbox_json ;;
+      6) export_vmess_uri ;;
+      7) export_vmess_singbox_json ;;
+      8) export_tuic_uri ;;
+      9) export_tuic_singbox_json ;;
+      10) export_anytls_singbox_json ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
