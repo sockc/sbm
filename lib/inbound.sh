@@ -522,7 +522,7 @@ print("----------------------------------------------------------------")
 
 idx = 1
 for ib in inbounds:
-    tag = ib.get("tag", "")
+    tag = ib.get("tag", "") or "<未设置>"
     typ = ib.get("type", "")
     listen = ib.get("listen", "")
     port = ib.get("listen_port", "")
@@ -552,7 +552,7 @@ inbounds = cfg.get("inbounds", [])
 if idx < 1 or idx > len(inbounds):
     raise SystemExit(1)
 
-print(inbounds[idx - 1].get("tag", ""))
+print(inbounds[idx - 1].get("tag", "") or "")
 PY
 }
 
@@ -591,15 +591,13 @@ delete_inbound_instance() {
   show_current_inbounds
   echo
 
-  local idx tag tmp_file meta_file
+  local idx tmp_file tag meta_file
   idx="$(prompt_required "请输入要删除的入站编号")"
-  tag="$(get_inbound_tag_by_index "${idx}")" || {
-    err "编号无效"
-    pause_enter
-    return 1
-  }
 
-  echo "准备删除入站实例：${tag}"
+  # 先取 tag，仅用于删元数据；允许为空
+  tag="$(get_inbound_tag_by_index "${idx}" 2>/dev/null || true)"
+
+  echo "准备删除入站实例：${tag:-<未设置>}"
   if ! confirm_default_no "确认继续吗？"; then
     warn "已取消"
     pause_enter
@@ -609,18 +607,20 @@ delete_inbound_instance() {
   tmp_file="${TMP_DIR}/config.delete-inbound.json"
   cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
-  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+  if ! python3 - "${tmp_file}" "${idx}" <<'PY'
 import json, sys
 
-path_cfg, target_tag = sys.argv[1], sys.argv[2]
+path_cfg = sys.argv[1]
+idx = int(sys.argv[2])
+
 cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
 inbounds = cfg.get("inbounds", [])
 
-new_inbounds = [ib for ib in inbounds if ib.get("tag") != target_tag]
-if len(new_inbounds) == len(inbounds):
+if idx < 1 or idx > len(inbounds):
     raise SystemExit(1)
 
-cfg["inbounds"] = new_inbounds
+del inbounds[idx - 1]
+cfg["inbounds"] = inbounds
 
 with open(path_cfg, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -645,11 +645,13 @@ PY
     return 1
   fi
 
-  meta_file="$(inbound_meta_file_by_tag "${tag}")"
-  rm -f "${meta_file}"
-  delete_legacy_inbound_meta_by_tag "${tag}"
+  if [ -n "${tag:-}" ]; then
+    meta_file="$(inbound_meta_file_by_tag "${tag}")"
+    rm -f "${meta_file}"
+    delete_legacy_inbound_meta_by_tag "${tag}"
+  fi
 
-  ok "已删除入站实例：${tag}"
+  ok "已删除入站实例：${tag:-<未设置>}"
   pause_enter
 }
 
