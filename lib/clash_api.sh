@@ -294,6 +294,45 @@ fi
   pause_enter
 }
 
+auto_sync_sources_after_clash_api_enable() {
+  if ! declare -F update_all_sources >/dev/null 2>&1; then
+    warn "未找到 update_all_sources，跳过自动更新节点源"
+    return 0
+  fi
+
+  if ! declare -F apply_all_sources_to_runtime >/dev/null 2>&1; then
+    warn "未找到 apply_all_sources_to_runtime，跳过自动应用节点源"
+    return 0
+  fi
+
+  if ! declare -F show_outbound_sources >/dev/null 2>&1; then
+    warn "未找到 show_outbound_sources，跳过自动同步节点源"
+    return 0
+  fi
+
+  # 粗略判断是否已有节点源
+  if ! show_outbound_sources 2>/dev/null | grep -qv '<暂无节点源>'; then
+    warn "当前没有可用节点源，已跳过自动同步"
+    return 0
+  fi
+
+  echo
+  echo "正在自动同步节点源到当前策略组..."
+
+  if ! update_all_sources; then
+    warn "节点源更新失败，但面板已成功启用"
+    return 0
+  fi
+
+  if ! apply_all_sources_to_runtime; then
+    warn "节点源应用失败，但面板已成功启用"
+    return 0
+  fi
+
+  ok "节点源已自动更新并应用到当前策略组"
+  return 0
+}
+
 enable_clash_api_preset() {
   require_clash_api_env || {
     pause_enter
@@ -350,6 +389,8 @@ enable_clash_api_preset() {
     pause_enter
     return 1
   fi
+
+  auto_sync_sources_after_clash_api_enable || true
 
   if [ "${preset}" = "public" ]; then
     local port backend
