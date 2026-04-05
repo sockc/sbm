@@ -1766,10 +1766,10 @@ show_outbound_status_header() {
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "              出站管理")"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
-  print_outbound_status_line "面板状态 :" "${panel_status}"   "panel"    "节点源   :" "${source_summary}" "source"
-  print_outbound_status_line "缓存节点 :" "${cache_nodes}"    "cache"    "已应用   :" "${applied_nodes}" "applied"
-  print_outbound_status_line "当前模板 :" "${template_name}"  "template" "默认出口 :" "${final_outbound}" "final"
-  print_outbound_status_line "出站代理 :" "${outbound_status}" "outbound" "中国流量 :" "${cn_flow}" "cnflow"
+  echo -e " ${C_BCYAN}面板状态 :${C_RESET} ${panel_status}\033[26G${C_BCYAN}节点源   :${C_RESET} ${source_summary}"
+  echo -e " ${C_BCYAN}缓存节点 :${C_RESET} ${cache_nodes}\033[26G${C_BCYAN}已应用   :${C_RESET} ${applied_nodes}"
+  echo -e " ${C_BCYAN}当前模板 :${C_RESET} ${template_name}\033[26G${C_BCYAN}默认出口 :${C_RESET} ${final_outbound}"
+  echo -e " ${C_BCYAN}出站代理 :${C_RESET} ${outbound_status}\033[26G${C_BCYAN}中国流量 :${C_RESET} ${cn_flow}"
   echo "$(paint "${C_BMAGENTA}${C_BOLD}" "======================================")"
 }
 
