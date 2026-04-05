@@ -169,7 +169,7 @@
         "MATCH:中国",
         "MATCH:China",
         "MATCH:CN",
-        "MATCH:北京",
+        "MATCH:北京"
       ]
     },
 
@@ -180,7 +180,7 @@
         "MATCH:香港",
         "MATCH:HK",
         "MATCH:Hong Kong",
-        "MATCH:HongKong",
+        "MATCH:HongKong"
       ]
     },
 
@@ -189,11 +189,8 @@
       "members": [
         "MATCH:🇹🇼",
         "MATCH:台湾",
-        "MATCH:台灣",
         "MATCH:TW",
         "MATCH:Taiwan",
-        "MATCH:Taipei",
-        "MATCH:台北",
       ]
     },
 
@@ -204,9 +201,7 @@
         "MATCH:日本",
         "MATCH:JP",
         "MATCH:Japan",
-        "MATCH:Tokyo",
-        "MATCH:大阪",
-        "MATCH:东京",
+        "MATCH:Tokyo"
       ]
     },
 
@@ -217,7 +212,7 @@
         "MATCH:新加坡",
         "MATCH:狮城",
         "MATCH:SG",
-        "MATCH:Singapore",
+        "MATCH:Singapore"
       ]
     },
 
@@ -228,10 +223,7 @@
         "MATCH:美国",
         "MATCH:USA",
         "MATCH:US",
-        "MATCH:United States",
-        "MATCH:America",
-        "MATCH:洛杉矶",
-        "MATCH:Los Angeles",
+        "MATCH:United States"
       ]
     },
 
@@ -242,7 +234,7 @@
         "MATCH:英国",
         "MATCH:UK",
         "MATCH:GB",
-        "MATCH:United Kingdom",
+        "MATCH:United Kingdom"
       ]
     },
 
@@ -253,7 +245,7 @@
         "MATCH:德国",
         "MATCH:DE",
         "MATCH:Germany",
-        "MATCH:法兰克福",
+        "MATCH:法兰克福"
       ]
     },
 
@@ -263,7 +255,7 @@
         "MATCH:🇳🇱",
         "MATCH:荷兰",
         "MATCH:NL",
-        "MATCH:Netherlands",
+        "MATCH:Netherlands"
       ]
     }
   },
@@ -277,15 +269,14 @@
       "ts.net"
     ],
 
-    "geosite-ads": {
+    "rule_sets": {
+      "geosite-ads": {
         "type": "remote",
         "format": "binary",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.srs",
         "download_detour": "direct",
         "update_interval": "1d"
       },
-
-    "rule_sets": {
       "geosite-cn": {
         "type": "remote",
         "format": "binary",
@@ -317,13 +308,6 @@
     },
 
     "route_groups": {
-      "📺 YouTube": [
-        "youtube.com",
-        "youtu.be",
-        "ytimg.com",
-        "googlevideo.com",
-        "youtube-nocookie.com"
-      ],
       "🌐 谷歌服务": [
         "google.com",
         "googleapis.com",
@@ -334,6 +318,13 @@
         "googletagmanager.com",
         "googlesyndication.com",
         "recaptcha.net"
+      ],
+      "📺 YouTube": [
+        "youtube.com",
+        "youtu.be",
+        "ytimg.com",
+        "googlevideo.com",
+        "youtube-nocookie.com"
       ],
       "🧠 人工智能": [
         "openai.com",
@@ -394,6 +385,9 @@
     },
 
     "route_rule_set_groups": {
+      "🛑 去广告": [
+        "geosite-ads"
+      ],
       "🏠 中国流量": [
         "geosite-cn",
         "geoip-cn"
