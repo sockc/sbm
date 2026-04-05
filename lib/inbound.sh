@@ -189,15 +189,15 @@ deploy_vless_reality() {
   local connect_host tcp_fast_open tmp_file
   local default_host flow
 
-  default_host="$(detect_connect_host)"
+  default_host="$(detect_default_connect_host)"
   [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP"
 
   reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
   listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_listen_port)"
   user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
-  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
-  server_name="$(prompt_default "请输入伪装域名 server_name" "www.cloudflare.com")"
+  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
+  server_name="$(prompt_default "请输入伪装域名 server_name" "download.visualstudio.microsoft.com")"
   handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "${server_name}")"
   handshake_port="$(prompt_default "请输入 Reality 握手目标端口" "443")"
   short_id="$(prompt_default "请输入 short_id" "$(gen_short_id)")"
@@ -287,14 +287,11 @@ reality_obj = {
     }
 }
 
-replaced = False
 for i, ib in enumerate(inbounds):
     if ib.get("tag") == reality_tag:
         inbounds[i] = reality_obj
-        replaced = True
         break
-
-if not replaced:
+else:
     inbounds.append(reality_obj)
 
 with open(path_cfg, 'w', encoding='utf-8') as f:
@@ -320,12 +317,13 @@ PY
     return 1
   fi
 
-  save_reality_meta \
-    "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${user_uuid}" \
-    "${flow}" "${server_name}" "${handshake_server}" "${handshake_port}" \
-    "${public_key}" "${private_key}" "${short_id}" "${tcp_fast_open}"
+  save_vless_meta \
+    "${reality_tag}" "reality" "${listen_addr}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
 
-ok "VLESS + Reality 部署完成"
+  ok "VLESS + Reality 部署完成"
   echo
   echo "------ 客户端关键参数 ------"
   echo "实例标签    : ${reality_tag}"
@@ -342,17 +340,11 @@ ok "VLESS + Reality 部署完成"
   echo "----------------------------"
   echo
 
-  save_vless_meta \
-    "${reality_tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
-    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
-    "" "" \
-    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
-
   local meta_file vless_uri
   meta_file="$(vless_meta_file_by_tag "${reality_tag}")"
   vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
   show_uri_and_qr "VLESS Reality URI" "${vless_uri}"
-  
+
   if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
     local backend
     backend="$(detect_firewall_backend)"
