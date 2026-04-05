@@ -1777,10 +1777,10 @@ menu_outbound_management() {
   while true; do
     clear
     show_outbound_status_header
-    echo "1. 节点源管理"
+    echo "1. 节点管理"
     echo "2. 路由策略"
     echo "3. 面板管理"
-    echo "4. 出站代理开关"
+    echo "4. 出站开关"
     echo "0. 返回"
     echo
 
