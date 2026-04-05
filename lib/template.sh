@@ -430,6 +430,14 @@ cfg["outbounds"] = preserved + generated
 
 rules_cfg = policy.get("rules", {})
 
+rule_sets_cfg = rules_cfg.get("rule_sets", {})
+if rule_sets_cfg:
+    route["rule_set"] = []
+    for tag, rs in rule_sets_cfg.items():
+        obj = {"tag": tag}
+        obj.update(rs)
+        route["rule_set"].append(obj)
+
 private_rule = {
     "ip_is_private": True,
     "action": "route",
@@ -454,10 +462,10 @@ for outbound_tag, suffixes in rules_cfg.get("route_groups", {}).items():
             "outbound": outbound_tag
         })
 
-for outbound_tag, cidrs in rules_cfg.get("route_ip_cidr_groups", {}).items():
-    if cidrs:
+for outbound_tag, rule_set_tags in rules_cfg.get("route_rule_set_groups", {}).items():
+    if rule_set_tags:
         rules.append({
-            "ip_cidr": cidrs,
+            "rule_set": rule_set_tags,
             "action": "route",
             "outbound": outbound_tag
         })
