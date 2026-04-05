@@ -189,8 +189,11 @@
       "members": [
         "MATCH:🇹🇼",
         "MATCH:台湾",
+        "MATCH:台灣",
         "MATCH:TW",
         "MATCH:Taiwan",
+        "MATCH:Taipei",
+        "MATCH:台北"
       ]
     },
 
@@ -201,7 +204,9 @@
         "MATCH:日本",
         "MATCH:JP",
         "MATCH:Japan",
-        "MATCH:Tokyo"
+        "MATCH:Tokyo",
+        "MATCH:大阪",
+        "MATCH:东京"
       ]
     },
 
@@ -223,7 +228,10 @@
         "MATCH:美国",
         "MATCH:USA",
         "MATCH:US",
-        "MATCH:United States"
+        "MATCH:United States",
+        "MATCH:America",
+        "MATCH:洛杉矶",
+        "MATCH:Los Angeles"
       ]
     },
 
