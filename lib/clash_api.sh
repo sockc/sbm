@@ -343,44 +343,76 @@ auto_sync_sources_after_clash_api_enable() {
   return 0
 }
 
+apply_clash_api_settings_to_file() {
+  local target_file="$1"
+  local mode="$2"                      # enable / disable
+  local controller="${3:-}"
+  local ui_dir="${4:-dashboard}"
+  local ui_url="${5:-}"
+  local ui_detour="${6:-}"
+  local secret="${7:-}"
+  local default_mode="${8:-Rule}"
+  local allow_origin="${9:-}"
+  local allow_private="${10:-false}"
+
+  if ! python3 - "${target_file}" \
+    "${mode}" "${controller}" "${ui_dir}" "${ui_url}" "${ui_detour}" \
+    "${secret}" "${default_mode}" "${allow_origin}" "${allow_private}" <<'PY'
+import json, sys
+
+(
+    path_cfg, mode, controller, ui_dir, ui_url, ui_detour,
+    secret, default_mode, allow_origin, allow_private
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+exp = cfg.setdefault("experimental", {})
+
+if mode == "disable":
+    exp.pop("clash_api", None)
+else:
+    clash = {}
+    clash["external_controller"] = controller
+    clash["external_ui"] = ui_dir
+
+    if ui_url:
+        clash["external_ui_download_url"] = ui_url
+    if ui_detour:
+        clash["external_ui_download_detour"] = ui_detour
+    if secret:
+        clash["secret"] = secret
+
+    clash["default_mode"] = default_mode or "Rule"
+
+    if allow_origin:
+        clash["access_control_allow_origin"] = [x.strip() for x in allow_origin.split(",") if x.strip()]
+    if str(allow_private).lower() == "true":
+        clash["access_control_allow_private_network"] = True
+
+    exp["clash_api"] = clash
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Clash API 配置失败"
+    return 1
+  fi
+
+  return 0
+}
+
 enable_clash_api_preset() {
   require_clash_api_env || {
     pause_enter
     return 1
   }
 
-  auto_apply_policy_file_after_clash_api_enable() {
-  if [ -z "${POLICY_GROUPS_FILE:-}" ]; then
-    warn "未定义 POLICY_GROUPS_FILE，跳过自动应用策略文件"
-    return 0
-  fi
-
-  if [ ! -f "${POLICY_GROUPS_FILE}" ]; then
-    warn "未找到策略文件，跳过自动应用：${POLICY_GROUPS_FILE}"
-    return 0
-  fi
-
-  if ! declare -F apply_policy_groups_file_silent >/dev/null 2>&1; then
-    warn "未找到 apply_policy_groups_file_silent，跳过自动应用策略文件"
-    return 0
-  fi
-
-  echo
-  echo "正在自动应用策略文件..."
-
-  if ! apply_policy_groups_file_silent; then
-    warn "策略文件应用失败，但面板已成功启用"
-    return 0
-  fi
-
-  ok "策略文件已自动应用"
-  return 0
-}
-
   local preset="$1" # local / public
   load_clash_api_current
 
   local controller secret ui_dir ui_url ui_detour default_mode allow_origin allow_private
+  local tmp_file
   ui_dir="dashboard"
   ui_detour="direct"
   default_mode="${CLASH_API_DEFAULT_MODE:-Rule}"
@@ -421,15 +453,60 @@ enable_clash_api_preset() {
     return 0
   fi
 
+  tmp_file="${TMP_DIR}/config.clash-api-batch.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
   clear_clash_ui_dir "${ui_dir}"
 
-  if ! apply_clash_api_settings "enable" "${controller}" "${ui_dir}" "${ui_url}" "${ui_detour}" "${secret}" "${default_mode}" "${allow_origin}" "${allow_private}"; then
+  if ! apply_clash_api_settings_to_file \
+    "${tmp_file}" \
+    "enable" \
+    "${controller}" \
+    "${ui_dir}" \
+    "${ui_url}" \
+    "${ui_detour}" \
+    "${secret}" \
+    "${default_mode}" \
+    "${allow_origin}" \
+    "${allow_private}"; then
     pause_enter
     return 1
   fi
 
-  auto_sync_sources_after_clash_api_enable || true
-  auto_apply_policy_file_after_clash_api_enable || true
+  if declare -F update_all_sources_silent >/dev/null 2>&1; then
+    echo
+    echo "正在自动更新节点源..."
+    update_all_sources_silent || warn "节点源更新失败，稍后可手动更新"
+  fi
+
+  if declare -F collect_all_source_cache_files >/dev/null 2>&1 && declare -F apply_cache_files_to_runtime_file >/dev/null 2>&1; then
+    mapfile -t _cache_files < <(collect_all_source_cache_files)
+    if [ "${#_cache_files[@]}" -gt 0 ]; then
+      echo "正在自动应用节点源..."
+      apply_cache_files_to_runtime_file "${tmp_file}" "${_cache_files[@]}" || warn "节点源应用失败，稍后可手动应用"
+    else
+      warn "当前没有可用节点缓存，已跳过自动应用节点源"
+    fi
+  fi
+
+  if [ -n "${POLICY_GROUPS_FILE:-}" ] && [ -f "${POLICY_GROUPS_FILE}" ] && declare -F apply_policy_groups_file_to_config >/dev/null 2>&1; then
+    echo "正在自动应用策略文件..."
+    apply_policy_groups_file_to_config "${tmp_file}" "${POLICY_GROUPS_FILE}" || warn "策略文件应用失败，稍后可手动应用"
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "最终配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
 
   if [ "${preset}" = "public" ]; then
     local port backend
@@ -448,7 +525,7 @@ enable_clash_api_preset() {
     fi
   fi
 
-  ok "Clash API 已启用，面板将自动下载"
+  ok "Clash API 已启用，面板已准备完成"
   pause_enter
 }
 
