@@ -920,6 +920,215 @@ PY
   show_current_proxy_selection
 }
 
+OUTBOUND_PROXY_STATE_FILE="${BASE_DIR}/outbound-proxy-state.json"
+
+save_outbound_proxy_state() {
+  local src_file="$1"
+  local state_file="${2:-${OUTBOUND_PROXY_STATE_FILE}}"
+
+  python3 - "${src_file}" "${state_file}" <<'PY'
+import json, sys
+
+cfg_path, state_path = sys.argv[1], sys.argv[2]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+
+route = cfg.get("route", {})
+selectors = {}
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector":
+        tag = str(ob.get("tag", "") or "")
+        if tag:
+            selectors[tag] = {
+                "default": ob.get("default", ""),
+                "outbounds": ob.get("outbounds", [])
+            }
+
+state = {
+    "route_final": route.get("final", ""),
+    "selectors": selectors
+}
+
+with open(state_path, 'w', encoding='utf-8') as f:
+    json.dump(state, f, ensure_ascii=False, indent=2)
+PY
+}
+
+disable_outbound_proxy() {
+  need_root
+
+  if ! require_config_file; then
+    pause_enter
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.disable-outbound.json"
+  mkdir -p "${TMP_DIR}"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! save_outbound_proxy_state "${CONFIG_DIR}/config.json" "${OUTBOUND_PROXY_STATE_FILE}"; then
+    err "保存当前出站状态失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! python3 - "${tmp_file}" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+cfg = json.load(open(path, 'r', encoding='utf-8'))
+
+route = cfg.setdefault("route", {})
+route["final"] = "direct"
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") == "selector":
+        outs = ob.get("outbounds", [])
+        if "direct" in outs:
+            ob["default"] = "direct"
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "关闭出站代理失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  echo "将执行以下操作："
+  echo "1. 保存当前出站状态"
+  echo "2. route.final 改为 direct"
+  echo "3. 所有 selector 默认值尽量切到 direct"
+  echo
+  if ! confirm_default_yes "确认关闭出站代理吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  ok "已关闭出站代理，当前默认直连"
+  pause_enter
+}
+
+restore_outbound_proxy() {
+  need_root
+
+  if ! require_config_file; then
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${OUTBOUND_PROXY_STATE_FILE}" ]; then
+    err "未找到可恢复的出站状态记录：${OUTBOUND_PROXY_STATE_FILE}"
+    pause_enter
+    return 1
+  fi
+
+  local tmp_file
+  tmp_file="${TMP_DIR}/config.restore-outbound.json"
+  mkdir -p "${TMP_DIR}"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${OUTBOUND_PROXY_STATE_FILE}" <<'PY'
+import json, sys
+
+cfg_path, state_path = sys.argv[1], sys.argv[2]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+state = json.load(open(state_path, 'r', encoding='utf-8'))
+
+route = cfg.setdefault("route", {})
+route["final"] = state.get("route_final", route.get("final", "direct"))
+
+selector_state = state.get("selectors", {})
+
+for ob in cfg.get("outbounds", []):
+    if ob.get("type") != "selector":
+        continue
+    tag = str(ob.get("tag", "") or "")
+    if tag not in selector_state:
+        continue
+
+    saved = selector_state[tag]
+    saved_default = saved.get("default", "")
+    current_outbounds = ob.get("outbounds", [])
+
+    if saved_default and saved_default in current_outbounds:
+        ob["default"] = saved_default
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "恢复出站代理失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  echo "将恢复："
+  echo "1. route.final"
+  echo "2. 各 selector 之前保存的默认值"
+  echo
+  if ! confirm_default_yes "确认恢复上次出站状态吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  ok "已恢复上次出站状态"
+  pause_enter
+}
+
+menu_outbound_proxy_switch() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "            出站代理开关"
+    echo "======================================"
+    echo "1. 关闭出站代理（默认直连）"
+    echo "2. 恢复上次出站状态"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-2]: " choice
+    case "${choice:-}" in
+      1) disable_outbound_proxy ;;
+      2) restore_outbound_proxy ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
 menu_route_policy_management() {
   while true; do
     clear
@@ -976,74 +1185,6 @@ menu_route_template_shortcuts() {
   done
 }
 
-disable_outbound_proxy() {
-  need_root
-
-  if ! require_config_file; then
-    pause_enter
-    return 1
-  fi
-
-  local tmp_file
-  tmp_file="${TMP_DIR}/config.disable-outbound.json"
-  mkdir -p "${TMP_DIR}"
-  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
-
-  if ! python3 - "${tmp_file}" <<'PY'
-import json, sys
-
-path = sys.argv[1]
-cfg = json.load(open(path, 'r', encoding='utf-8'))
-
-route = cfg.setdefault("route", {})
-
-# 关闭出站代理：默认直连
-route["final"] = "direct"
-
-# 尽量把所有 selector 默认值切回 direct，避免命中分组后还继续代理
-for ob in cfg.get("outbounds", []):
-    if ob.get("type") == "selector":
-        outs = ob.get("outbounds", [])
-        if "direct" in outs:
-            ob["default"] = "direct"
-
-with open(path, 'w', encoding='utf-8') as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=2)
-PY
-  then
-    err "关闭出站代理失败"
-    pause_enter
-    return 1
-  fi
-
-  if ! check_config_file "${tmp_file}"; then
-    err "配置校验失败，未覆盖正式配置"
-    pause_enter
-    return 1
-  fi
-
-  echo "将执行以下操作："
-  echo "1. route.final 改为 direct"
-  echo "2. 所有 selector 组默认值尽量切到 direct"
-  echo
-  if ! confirm_default_yes "确认关闭出站代理吗？"; then
-    warn "已取消"
-    pause_enter
-    return 0
-  fi
-
-  activate_config_file "${tmp_file}"
-
-  if ! restart_singbox_service; then
-    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
-    pause_enter
-    return 1
-  fi
-
-  ok "已关闭出站代理，当前默认直连"
-  pause_enter
-}
-
 menu_outbound_management() {
   while true; do
     clear
@@ -1053,7 +1194,7 @@ menu_outbound_management() {
     echo "1. 节点源管理"
     echo "2. 路由策略"
     echo "3. 面板管理"
-    echo "4. 关闭出站代理"
+    echo "4. 出站代理开关"
     echo "0. 返回"
     echo
 
@@ -1062,7 +1203,7 @@ menu_outbound_management() {
       1) menu_outbound_source_management ;;
       2) menu_route_policy_management ;;
       3) menu_clash_api_management ;;
-      4) disable_outbound_proxy ;;
+      4) menu_outbound_proxy_switch ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
