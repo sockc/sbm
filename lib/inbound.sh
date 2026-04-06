@@ -2459,13 +2459,118 @@ select_route_outbound_tag() {
   printf '%s\n' "${tag}"
 }
 
+relay_fw_allowed_for_proto() {
+  local port="$1"
+  local proto="$2"
+  local backend
+
+  if ! declare -F detect_firewall_backend >/dev/null 2>&1; then
+    return 2
+  fi
+
+  backend="$(detect_firewall_backend 2>/dev/null || echo none)"
+
+  case "${backend}" in
+    ufw)
+      if ufw status 2>/dev/null | grep -Eiq "(^|[[:space:]])${port}/${proto}([[:space:]]|$).*ALLOW"; then
+        return 0
+      fi
+      return 1
+      ;;
+    firewalld)
+      if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/${proto}"; then
+        return 0
+      fi
+      return 1
+      ;;
+    iptables)
+      if iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+relay_fw_status_text() {
+  local port="$1"
+  local network="$2"
+
+  local tcp_rc udp_rc
+  tcp_rc=2
+  udp_rc=2
+
+  case "${network}" in
+    tcp)
+      relay_fw_allowed_for_proto "${port}" "tcp"
+      case "$?" in
+        0) printf '%s\n' "tcp 已放行" ;;
+        1) printf '%s\n' "tcp 未放行" ;;
+        *) printf '%s\n' "tcp 未知" ;;
+      esac
+      ;;
+    udp)
+      relay_fw_allowed_for_proto "${port}" "udp"
+      case "$?" in
+        0) printf '%s\n' "udp 已放行" ;;
+        1) printf '%s\n' "udp 未放行" ;;
+        *) printf '%s\n' "udp 未知" ;;
+      esac
+      ;;
+    ""|tcp+udp)
+      relay_fw_allowed_for_proto "${port}" "tcp"; tcp_rc="$?"
+      relay_fw_allowed_for_proto "${port}" "udp"; udp_rc="$?"
+
+      if [ "${tcp_rc}" = "0" ] && [ "${udp_rc}" = "0" ]; then
+        printf '%s\n' "tcp/udp 已放行"
+      elif [ "${tcp_rc}" = "1" ] && [ "${udp_rc}" = "1" ]; then
+        printf '%s\n' "tcp/udp 未放行"
+      elif [ "${tcp_rc}" = "2" ] || [ "${udp_rc}" = "2" ]; then
+        printf '%s\n' "tcp/udp 未知"
+      else
+        printf '%s\n' "tcp/udp 部分放行"
+      fi
+      ;;
+    *)
+      printf '%s\n' "未知"
+      ;;
+  esac
+}
+
+relay_status_color() {
+  case "${1:-}" in
+    *已放行*|active|running)
+      printf "%s" "${C_BGREEN:-}"
+      ;;
+    *部分放行*|*未放行*|inactive|degraded)
+      printf "%s" "${C_BYELLOW:-${C_YELLOW:-}}"
+      ;;
+    *未知*|unknown)
+      printf "%s" "${C_BCYAN:-}"
+      ;;
+    *)
+      printf "%s" "${C_RESET:-}"
+      ;;
+  esac
+}
+
 show_current_relays() {
   require_config_file || {
     pause_enter
     return 1
   }
 
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+  local svc_status="unknown"
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  local -a relay_rows=()
+  mapfile -t relay_rows < <(
+    python3 - "${CONFIG_DIR}/config.json" <<'PY'
 import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
@@ -2474,37 +2579,74 @@ relay_route = {}
 
 for r in route_rules:
     inbound = r.get("inbound")
+    outbound = r.get("outbound", "")
     if isinstance(inbound, str):
-        relay_route[inbound] = r.get("outbound", "")
+        relay_route[inbound] = outbound
     elif isinstance(inbound, list):
         for x in inbound:
             if isinstance(x, str):
-                relay_route[x] = r.get("outbound", "")
+                relay_route[x] = outbound
 
-print("当前中转实例：")
-print("编号 标签                     网络       监听地址              目标地址                 出口")
-print("------------------------------------------------------------------------------------------------")
-
-idx = 1
 for ib in cfg.get("inbounds", []):
     if ib.get("type") != "direct":
         continue
-    tag = str(ib.get("tag", "") or "")
+
+    tag = str(ib.get("tag", "") or "<未设置>")
     network = str(ib.get("network", "") or "tcp+udp")
     listen = str(ib.get("listen", "") or "<空>")
     listen_port = str(ib.get("listen_port", "") or "<空>")
     target_host = str(ib.get("override_address", "") or "<空>")
     target_port = str(ib.get("override_port", "") or "<空>")
-    outbound = relay_route.get(tag, "<未指定>")
-    print(f"{idx:<4} {tag:<24} {network:<10} {listen}:{listen_port:<18} {target_host}:{target_port:<22} {outbound}")
-    idx += 1
+    outbound = str(relay_route.get(str(ib.get("tag", "") or ""), "") or "<未指定>")
 
-if idx == 1:
-    print("<暂无中转实例>")
-
-print("------------------------------------------------------------------------------------------------")
+    print("\t".join([tag, network, listen, listen_port, target_host, target_port, outbound]))
 PY
+  )
 
+  clear
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  echo "${C_BMAGENTA:-}            中转实例状态${C_RESET:-}"
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  printf "%b%-10s%b %b%s%b\n" \
+    "${C_BCYAN:-}" "服务状态 :" "${C_RESET:-}" \
+    "$(relay_status_color "${svc_status}")" "${svc_status:-unknown}" "${C_RESET:-}"
+  printf "%b%-10s%b %s\n" \
+    "${C_BCYAN:-}" "实例数量 :" "${C_RESET:-}" "${#relay_rows[@]}"
+  echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+
+  if [ "${#relay_rows[@]}" -eq 0 ]; then
+    echo "暂无中转实例"
+    echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+    pause_enter
+    return 0
+  fi
+
+  local idx=1
+  local row tag network listen listen_port target_host target_port outbound fw_status fw_color
+  for row in "${relay_rows[@]}"; do
+    IFS=$'\t' read -r tag network listen listen_port target_host target_port outbound <<< "${row}"
+    fw_status="$(relay_fw_status_text "${listen_port}" "${network}")"
+    fw_color="$(relay_status_color "${fw_status}")"
+
+    echo
+    printf "%b[%d] %s%b\n" "${C_BCYAN:-}${C_BOLD:-}" "${idx}" "${tag}" "${C_RESET:-}"
+    printf "%b%-10s%b %s:%s (%s)\n" \
+      "${C_BCYAN:-}" "监听 :" "${C_RESET:-}" \
+      "${listen}" "${listen_port}" "${network}"
+    printf "%b%-10s%b %s:%s\n" \
+      "${C_BCYAN:-}" "目标 :" "${C_RESET:-}" \
+      "${target_host}" "${target_port}"
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "出口 :" "${C_RESET:-}" \
+      "${outbound}"
+    printf "%b%-10s%b %b%s%b\n" \
+      "${C_BCYAN:-}" "防火墙 :" "${C_RESET:-}" \
+      "${fw_color}" "${fw_status}" "${C_RESET:-}"
+    echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+    idx=$((idx + 1))
+  done
+
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
   pause_enter
 }
 
