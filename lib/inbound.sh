@@ -2373,18 +2373,31 @@ prompt_relay_network() {
   while true; do
     echo
     echo "请选择中转网络类型："
-    echo "1. tcp"
-    echo "2. udp"
-    echo "3. tcp+udp"
-    read -r -p "请选择 [1-3]（默认 1）: " choice
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）"
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）"
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）"
+    read -r -p "请选择 [1-3]（默认 1=仅 TCP）: " choice
+
     case "${choice:-1}" in
-      1) printf '%s\n' "tcp"; return 0 ;;
-      2) printf '%s\n' "udp"; return 0 ;;
-      3) printf '%s\n' ""; return 0 ;;   # 空表示 both
-      *) echo "无效选项" ;;
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' ""
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3"
+        ;;
     esac
   done
 }
+
 
 list_route_outbound_candidates() {
   python3 - "${CONFIG_DIR}/config.json" <<'PY'
@@ -2392,15 +2405,27 @@ import json, sys
 
 cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 rows = []
+seen = set()
 
-for ob in cfg.get("outbounds", []):
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
     tag = str(ob.get("tag", "") or "")
     typ = str(ob.get("type", "") or "")
     if not tag:
         continue
     if tag == "dns-out":
         continue
-    rows.append((tag, typ))
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append((tag, typ or "unknown"))
+        seen.add(tag)
+
+# 没有 direct 就补一个，保证中转机至少能 direct 出去
+if not has_direct:
+    rows.insert(0, ("direct", "direct"))
 
 for i, (tag, typ) in enumerate(rows, 1):
     print(f"{i}\t{tag}\t{typ}")
@@ -2416,11 +2441,23 @@ cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
 idx = int(sys.argv[2])
 
 rows = []
-for ob in cfg.get("outbounds", []):
+seen = set()
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
     tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
     if not tag or tag == "dns-out":
         continue
-    rows.append(tag)
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append(tag)
+        seen.add(tag)
+
+if not has_direct:
+    rows.insert(0, "direct")
 
 if idx < 1 or idx > len(rows):
     raise SystemExit(1)
@@ -2445,8 +2482,9 @@ select_route_outbound_tag() {
   echo "--------------------------------------------------------"
 
   if [ "${found}" -eq 0 ]; then
-    err "未找到可用 outbound"
-    return 1
+    warn "未检测到现有 outbound，已自动回退到 direct"
+    printf '%s\n' "direct"
+    return 0
   fi
 
   local idx tag
@@ -2968,27 +3006,38 @@ PY
 
 prompt_relay_network_default() {
   local default_net="$1"
-  local net
+  local choice default_choice
 
-  [ -z "${default_net}" ] && default_net="tcp+udp"
+  case "${default_net}" in
+    tcp) default_choice="1" ;;
+    udp) default_choice="2" ;;
+    ""|tcp+udp) default_choice="3" ;;
+    *) default_choice="1" ;;
+  esac
 
   while true; do
-    net="$(prompt_default "请输入中转网络类型（tcp/udp/tcp+udp）" "${default_net}")"
-    case "${net}" in
-      tcp|TCP)
+    echo
+    echo "请选择中转网络类型："
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）"
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）"
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）"
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1)
         printf '%s\n' "tcp"
         return 0
         ;;
-      udp|UDP)
+      2)
         printf '%s\n' "udp"
         return 0
         ;;
-      tcp+udp|TCP+UDP|both|BOTH|"")
+      3)
         printf '%s\n' ""
         return 0
         ;;
       *)
-        echo "输入无效：只能是 tcp / udp / tcp+udp"
+        echo "无效选项：只能输入 1 / 2 / 3"
         ;;
     esac
   done
@@ -3081,8 +3130,22 @@ import json, sys
 
 cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
 inbounds = cfg.setdefault("inbounds", [])
+outbounds = cfg.setdefault("outbounds", [])
 route = cfg.setdefault("route", {})
 rules = route.setdefault("rules", [])
+
+# 如果要走 direct，但当前配置里没有 direct outbound，就自动补一个
+has_direct = False
+for ob in outbounds:
+    if str(ob.get("tag", "") or "") == "direct" or str(ob.get("type", "") or "") == "direct":
+        has_direct = True
+        break
+
+if route_outbound == "direct" and not has_direct:
+    outbounds.insert(0, {
+        "type": "direct",
+        "tag": "direct"
+    })
 
 updated = False
 for ib in inbounds:
