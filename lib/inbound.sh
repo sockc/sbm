@@ -2924,6 +2924,269 @@ PY
   pause_enter
 }
 
+get_direct_relay_detail_by_tag() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+route_rules = cfg.get("route", {}).get("rules", [])
+route_outbound = ""
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if matched:
+        route_outbound = str(r.get("outbound", "") or "")
+        break
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    print(str(ib.get("listen", "") or "::"))
+    print(str(ib.get("listen_port", "") or "12345"))
+    print(str(ib.get("network", "") or "tcp+udp"))
+    print(str(ib.get("override_address", "") or ""))
+    print(str(ib.get("override_port", "") or "443"))
+    print(route_outbound)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+prompt_relay_network_default() {
+  local default_net="$1"
+  local net
+
+  [ -z "${default_net}" ] && default_net="tcp+udp"
+
+  while true; do
+    net="$(prompt_default "请输入中转网络类型（tcp/udp/tcp+udp）" "${default_net}")"
+    case "${net}" in
+      tcp|TCP)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      udp|UDP)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      tcp+udp|TCP+UDP|both|BOTH|"")
+        printf '%s\n' ""
+        return 0
+        ;;
+      *)
+        echo "输入无效：只能是 tcp / udp / tcp+udp"
+        ;;
+    esac
+  done
+}
+
+edit_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag
+  local cur_listen cur_port cur_network cur_target_host cur_target_port cur_outbound
+  local listen_addr listen_port network target_host target_port route_outbound
+  local tmp_file
+
+  idx="$(prompt_required "请输入要修改的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  mapfile -t _relay_detail < <(get_direct_relay_detail_by_tag "${tag}") || {
+    err "读取中转实例详情失败"
+    pause_enter
+    return 1
+  }
+
+  cur_listen="${_relay_detail[0]:-::}"
+  cur_port="${_relay_detail[1]:-12345}"
+  cur_network="${_relay_detail[2]:-tcp+udp}"
+  cur_target_host="${_relay_detail[3]:-}"
+  cur_target_port="${_relay_detail[4]:-443}"
+  cur_outbound="${_relay_detail[5]:-direct}"
+
+  echo "当前实例标签：${tag}"
+  echo
+
+  listen_addr="$(prompt_default "请输入监听地址" "${cur_listen}")"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "${cur_port}")"
+  network="$(prompt_relay_network_default "${cur_network}")"
+  target_host="$(prompt_default "请输入后端目标地址（落地机 IP/域名）" "${cur_target_host}")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "${cur_target_port}")"
+
+  echo
+  echo "当前出口标签：${cur_outbound}"
+  if confirm_default_no "是否重新选择出口标签？"; then
+    route_outbound="$(select_route_outbound_tag)" || {
+      pause_enter
+      return 1
+    }
+  else
+    route_outbound="${cur_outbound}"
+  fi
+
+  echo
+  echo "========== 修改预览 =========="
+  echo "实例标签       : ${tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "网络类型       : ${network:-tcp+udp}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.edit-direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+updated = False
+for ib in inbounds:
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    ib["listen"] = listen_addr
+    ib["listen_port"] = int(listen_port)
+    ib["override_address"] = target_host
+    ib["override_port"] = int(target_port)
+
+    if network:
+        ib["network"] = network
+    else:
+        ib.pop("network", None)
+
+    updated = True
+    break
+
+if not updated:
+    raise SystemExit(1)
+
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "修改中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_direct_relay_meta \
+    "${tag}" "${listen_addr}" "${listen_port}" "${network:-tcp+udp}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+
+  ok "已修改中转实例：${tag}"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
 menu_relay_management() {
   while true; do
     clear
@@ -2932,15 +3195,17 @@ menu_relay_management() {
     echo "======================================"
     echo "1. 新建固定目标中转"
     echo "2. 查看当前中转实例"
-    echo "3. 删除指定中转实例"
+    echo "3. 修改指定中转实例"
+    echo "4. 删除指定中转实例"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-3]: " choice
+    read -r -p "请选择 [0-4]: " choice
     case "${choice:-}" in
       1) deploy_direct_relay ;;
       2) show_current_relays ;;
-      3) delete_direct_relay_instance ;;
+      3) edit_direct_relay_instance ;;
+      4) delete_direct_relay_instance ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
