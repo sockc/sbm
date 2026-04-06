@@ -2388,7 +2388,7 @@ prompt_relay_network() {
         return 0
         ;;
       3)
-        printf '%s\n' ""
+        printf '%s\n' "both"
         return 0
         ;;
       *)
@@ -2739,7 +2739,9 @@ deploy_direct_relay() {
   echo "实例标签       : ${relay_tag}"
   echo "监听地址       : ${listen_addr}"
   echo "监听端口       : ${listen_port}"
-  echo "网络类型       : ${network:-tcp+udp}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
   echo "后端目标       : ${target_host}:${target_port}"
   echo "出口标签       : ${route_outbound}"
   echo "================================="
@@ -2778,7 +2780,7 @@ relay_obj = {
     "override_port": int(target_port)
 }
 
-if network:
+if network in ("tcp", "udp"):
     relay_obj["network"] = network
 
 replaced = False
@@ -2835,10 +2837,13 @@ PY
     return 1
   fi
 
-  save_direct_relay_meta \
-    "${relay_tag}" "${listen_addr}" "${listen_port}" "${network:-tcp+udp}" \
-    "${target_host}" "${target_port}" "${route_outbound}"
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
 
+  save_direct_relay_meta \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+  
   ok "固定目标中转部署完成"
   echo
   echo "------ 中转关键信息 ------"
@@ -3011,7 +3016,7 @@ prompt_relay_network_default() {
   case "${default_net}" in
     tcp) default_choice="1" ;;
     udp) default_choice="2" ;;
-    ""|tcp+udp) default_choice="3" ;;
+    both|tcp+udp|"") default_choice="3" ;;
     *) default_choice="1" ;;
   esac
 
@@ -3033,7 +3038,7 @@ prompt_relay_network_default() {
         return 0
         ;;
       3)
-        printf '%s\n' ""
+        printf '%s\n' "both"
         return 0
         ;;
       *)
@@ -3103,7 +3108,9 @@ edit_direct_relay_instance() {
   echo "实例标签       : ${tag}"
   echo "监听地址       : ${listen_addr}"
   echo "监听端口       : ${listen_port}"
-  echo "网络类型       : ${network:-tcp+udp}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
   echo "后端目标       : ${target_host}:${target_port}"
   echo "出口标签       : ${route_outbound}"
   echo "============================="
@@ -3159,7 +3166,7 @@ for ib in inbounds:
     ib["override_address"] = target_host
     ib["override_port"] = int(target_port)
 
-    if network:
+    if network in ("tcp", "udp"):
         ib["network"] = network
     else:
         ib.pop("network", None)
@@ -3214,10 +3221,13 @@ PY
     return 1
   fi
 
-  save_direct_relay_meta \
-    "${tag}" "${listen_addr}" "${listen_port}" "${network:-tcp+udp}" \
-    "${target_host}" "${target_port}" "${route_outbound}"
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
 
+  save_direct_relay_meta \
+    "${tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+    
   ok "已修改中转实例：${tag}"
   echo
 
