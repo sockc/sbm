@@ -291,7 +291,7 @@
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tracker.srs",
         "download_detour": "direct",
         "update_interval": "1d"
-      }
+      },
       "geosite-cn": {
         "type": "remote",
         "format": "binary",
@@ -401,7 +401,7 @@
 
     "route_rule_set_groups": {
       "🛑 去广告": [
-        "geosite-ads"
+        "geosite-ads",
         "geosite-tracker"
       ],
       "🏠 中国流量": [
