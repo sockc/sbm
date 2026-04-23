@@ -172,17 +172,29 @@ PY
 prompt_realm_listen_mode() {
   local choice
   while true; do
-    echo
-    echo "请选择监听模式："
-    echo "1. IPv4 only   （监听 0.0.0.0）"
-    echo "2. Dual stack  （监听 [::]，同时兼容 IPv4/IPv6）"
-    echo "3. IPv6 only   （监听 [::]，仅 IPv6）"
+    echo >&2
+    echo "请选择监听模式：" >&2
+    echo "1. IPv4 only   （监听 0.0.0.0，仅 IPv4）" >&2
+    echo "2. Dual stack  （监听 [::]，同时兼容 IPv4/IPv6，推荐）" >&2
+    echo "3. IPv6 only   （监听 [::]，仅 IPv6）" >&2
     read -r -p "请选择 [1-3]（默认 2）: " choice
+
     case "${choice:-2}" in
-      1) printf '%s\n' "ipv4"; return 0 ;;
-      2) printf '%s\n' "dual"; return 0 ;;
-      3) printf '%s\n' "ipv6"; return 0 ;;
-      *) echo "无效选项" ;;
+      1)
+        printf '%s\n' "ipv4"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "dual"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "ipv6"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
     esac
   done
 }
@@ -190,17 +202,29 @@ prompt_realm_listen_mode() {
 prompt_realm_transport() {
   local choice
   while true; do
-    echo
-    echo "请选择转发协议："
-    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）"
-    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）"
-    echo "3. TCP+UDP  （同时转发两种流量）"
+    echo >&2
+    echo "请选择转发协议：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时转发两种流量，通用）" >&2
     read -r -p "请选择 [1-3]（默认 1）: " choice
+
     case "${choice:-1}" in
-      1) printf '%s\n' "tcp" ; return 0 ;;
-      2) printf '%s\n' "udp" ; return 0 ;;
-      3) printf '%s\n' "both"; return 0 ;;
-      *) echo "无效选项" ;;
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
     esac
   done
 }
