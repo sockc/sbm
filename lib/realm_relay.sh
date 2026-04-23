@@ -632,6 +632,206 @@ restart_realm_instance() {
   pause_enter
 }
 
+get_realm_meta_detail_by_tag() {
+  local tag="$1"
+  local meta_file
+  meta_file="$(realm_tag_to_meta "${tag}")"
+
+  [ -f "${meta_file}" ] || return 1
+
+  python3 - "${meta_file}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+print(str(data.get("listen_mode", "dual") or "dual"))
+print(str(data.get("listen_port", "26845") or "26845"))
+print(str(data.get("remote_host", "") or ""))
+print(str(data.get("remote_port", "26845") or "26845"))
+print(str(data.get("transport", "tcp") or "tcp"))
+PY
+}
+
+prompt_realm_listen_mode_default() {
+  local default_mode="$1"
+  local choice default_choice
+
+  case "${default_mode}" in
+    ipv4) default_choice="1" ;;
+    dual) default_choice="2" ;;
+    ipv6) default_choice="3" ;;
+    *) default_choice="2" ;;
+  esac
+
+  while true; do
+    echo >&2
+    echo "请选择监听模式：" >&2
+    echo "1. IPv4 only   （监听 0.0.0.0，仅 IPv4）" >&2
+    echo "2. Dual stack  （监听 [::]，同时兼容 IPv4/IPv6，推荐）" >&2
+    echo "3. IPv6 only   （监听 [::]，仅 IPv6）" >&2
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1) printf '%s\n' "ipv4"; return 0 ;;
+      2) printf '%s\n' "dual"; return 0 ;;
+      3) printf '%s\n' "ipv6"; return 0 ;;
+      *) echo "无效选项：只能输入 1 / 2 / 3" >&2 ;;
+    esac
+  done
+}
+
+prompt_realm_transport_default() {
+  local default_transport="$1"
+  local choice default_choice
+
+  case "${default_transport}" in
+    tcp)  default_choice="1" ;;
+    udp)  default_choice="2" ;;
+    both) default_choice="3" ;;
+    *)    default_choice="1" ;;
+  esac
+
+  while true; do
+    echo >&2
+    echo "请选择转发协议：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时转发两种流量，通用）" >&2
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1) printf '%s\n' "tcp"; return 0 ;;
+      2) printf '%s\n' "udp"; return 0 ;;
+      3) printf '%s\n' "both"; return 0 ;;
+      *) echo "无效选项：只能输入 1 / 2 / 3" >&2 ;;
+    esac
+  done
+}
+
+edit_realm_instance() {
+  need_root
+  ensure_realm_dirs
+
+  show_realm_instances
+  echo
+
+  local idx tag
+  local cur_listen_mode cur_listen_port cur_remote_host cur_remote_port cur_transport
+  local listen_mode listen_port listen_info listen_addr ipv6_only
+  local remote_host remote_port remote_addr transport
+  local conf_path unit_name
+
+  idx="$(prompt_required "请输入要修改的 Realm 实例编号")"
+  tag="$(get_realm_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  mapfile -t _realm_detail < <(get_realm_meta_detail_by_tag "${tag}") || {
+    err "读取 Realm 实例详情失败"
+    pause_enter
+    return 1
+  }
+
+  cur_listen_mode="${_realm_detail[0]:-dual}"
+  cur_listen_port="${_realm_detail[1]:-26845}"
+  cur_remote_host="${_realm_detail[2]:-}"
+  cur_remote_port="${_realm_detail[3]:-26845}"
+  cur_transport="${_realm_detail[4]:-tcp}"
+
+  echo "当前实例标签：${tag}"
+  echo
+
+  listen_mode="$(prompt_realm_listen_mode_default "${cur_listen_mode}")"
+  listen_port="$(prompt_port_default "请输入 Realm 监听端口" "${cur_listen_port}")"
+  listen_info="$(resolve_realm_listen_conf "${listen_mode}" "${listen_port}")"
+  listen_addr="${listen_info%%|*}"
+  ipv6_only="${listen_info##*|}"
+
+  remote_host="$(prompt_default "请输入后端目标地址（IPv4 / IPv6 / 域名）" "${cur_remote_host}")"
+  remote_port="$(prompt_port_default "请输入后端目标端口" "${cur_remote_port}")"
+  remote_addr="$(format_realm_hostport "${remote_host}" "${remote_port}")"
+
+  transport="$(prompt_realm_transport_default "${cur_transport}")"
+
+  echo
+  echo "========== Realm 修改预览 =========="
+  echo "实例标签       : ${tag}"
+  echo "监听模式       : ${listen_mode}"
+  echo "监听地址       : ${listen_addr}"
+  echo "后端目标       : ${remote_addr}"
+  echo "转发协议       : ${transport}"
+  echo "===================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 Realm 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  conf_path="$(realm_tag_to_conf "${tag}")"
+  unit_name="$(realm_tag_to_unit "${tag}")"
+
+  write_realm_config "${conf_path}" "${listen_addr}" "${remote_addr}" "${transport}" "${ipv6_only}" || {
+    err "写入 Realm 配置失败"
+    pause_enter
+    return 1
+  }
+
+  save_realm_meta "${tag}" "${listen_mode}" "${listen_addr}" "${listen_port}" "${remote_host}" "${remote_port}" "${transport}"
+
+  systemctl daemon-reload
+  if systemctl cat "${unit_name}" >/dev/null 2>&1; then
+    systemctl restart "${unit_name}" || {
+      err "重启 Realm 实例失败：${tag}"
+      pause_enter
+      return 1
+    }
+  else
+    write_realm_service "${tag}" "${conf_path}" || {
+      err "写入 systemd 服务失败"
+      pause_enter
+      return 1
+    }
+    systemctl daemon-reload
+    systemctl enable --now "${unit_name}" || {
+      err "启动 Realm 实例失败：${tag}"
+      pause_enter
+      return 1
+    }
+  fi
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      case "${transport}" in
+        tcp)
+          if confirm_default_no "是否尝试放行 ${listen_port}/tcp 到防火墙？"; then
+            fw_open_port "${backend}" "${listen_port}" "tcp" && ok "已放行 ${listen_port}/tcp" || err "放行失败"
+          fi
+          ;;
+        udp)
+          if confirm_default_no "是否尝试放行 ${listen_port}/udp 到防火墙？"; then
+            fw_open_port "${backend}" "${listen_port}" "udp" && ok "已放行 ${listen_port}/udp" || err "放行失败"
+          fi
+          ;;
+        both)
+          if confirm_default_no "是否尝试放行 ${listen_port}/tcp 到防火墙？"; then
+            fw_open_port "${backend}" "${listen_port}" "tcp" && ok "已放行 ${listen_port}/tcp" || err "放行失败"
+          fi
+          if confirm_default_no "是否尝试放行 ${listen_port}/udp 到防火墙？"; then
+            fw_open_port "${backend}" "${listen_port}" "udp" && ok "已放行 ${listen_port}/udp" || err "放行失败"
+          fi
+          ;;
+      esac
+    fi
+  fi
+
+  ok "已修改 Realm 实例：${tag}"
+  pause_enter
+}
+
 menu_realm_relay_management() {
   while true; do
     clear
@@ -641,18 +841,20 @@ menu_realm_relay_management() {
     echo "1. 安装 Realm"
     echo "2. 新建 Realm 中转"
     echo "3. 查看 Realm 中转状态"
-    echo "4. 重启 Realm 实例"
-    echo "5. 删除 Realm 实例"
+    echo "4. 修改 Realm 实例"
+    echo "5. 重启 Realm 实例"
+    echo "6. 删除 Realm 实例"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-5]: " choice
+    read -r -p "请选择 [0-6]: " choice
     case "${choice:-}" in
       1) install_realm_latest ;;
       2) deploy_realm_relay ;;
       3) show_realm_instances ;;
-      4) restart_realm_instance ;;
-      5) delete_realm_instance ;;
+      4) edit_realm_instance ;;
+      5) restart_realm_instance ;;
+      6) delete_realm_instance ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
