@@ -3262,11 +3262,11 @@ PY
   pause_enter
 }
 
-menu_relay_management() {
+menu_singbox_relay_management() {
   while true; do
     clear
     echo "======================================"
-    echo "              中转管理"
+    echo "         Sing-box 固定目标中转"
     echo "======================================"
     echo "1. 新建固定目标中转"
     echo "2. 查看当前中转实例"
@@ -3281,6 +3281,27 @@ menu_relay_management() {
       2) show_current_relays ;;
       3) edit_direct_relay_instance ;;
       4) delete_direct_relay_instance ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              中转管理"
+    echo "======================================"
+    echo "1. Sing-box 固定目标中转"
+    echo "2. Realm 中转"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-2]: " choice
+    case "${choice:-}" in
+      1) menu_singbox_relay_management ;;
+      2) menu_realm_relay_management ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
