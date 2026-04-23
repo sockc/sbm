@@ -488,28 +488,86 @@ print(rows[idx-1])
 PY
 }
 
+realm_status_color() {
+  case "${1:-}" in
+    active|running)
+      printf "%s" "${C_BGREEN:-}"
+      ;;
+    activating|reloading)
+      printf "%s" "${C_BYELLOW:-${C_YELLOW:-}}"
+      ;;
+    failed|inactive|dead)
+      printf "%s" "${C_BRED:-${C_RED:-}}"
+      ;;
+    *)
+      printf "%s" "${C_BCYAN:-}"
+      ;;
+  esac
+}
+
 show_realm_instances() {
   ensure_realm_dirs
 
-  echo "编号 标签                     监听模式    监听地址              目标地址                 协议        服务状态"
-  echo "----------------------------------------------------------------------------------------------------------------"
+  local -a rows=()
+  mapfile -t rows < <(list_realm_instances)
 
-  local found=0
-  while IFS=$'\t' read -r idx tag listen_mode listen_addr remote_host remote_port transport; do
-    [ -z "${idx}" ] && continue
-    found=1
-    local unit status
-    unit="$(realm_tag_to_unit "${tag}")"
-    status="$(systemctl is-active "${unit}" 2>/dev/null || echo inactive)"
-    printf '%-4s %-24s %-10s %-20s %-24s %-10s %s\n' \
-      "${idx}" "${tag}" "${listen_mode}" "${listen_addr}" "${remote_host}:${remote_port}" "${transport}" "${status}"
-  done < <(list_realm_instances)
+  clear
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  echo "${C_BMAGENTA:-}          Realm 中转实例状态${C_RESET:-}"
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  printf "%b%-10s%b %s\n" \
+    "${C_BCYAN:-}" "实例数量 :" "${C_RESET:-}" "${#rows[@]}"
+  echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
 
-  if [ "${found}" -eq 0 ]; then
-    echo "<暂无 Realm 中转实例>"
+  if [ "${#rows[@]}" -eq 0 ]; then
+    echo "暂无 Realm 中转实例"
+    echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+    pause_enter
+    return 0
   fi
 
-  echo "----------------------------------------------------------------------------------------------------------------"
+  local idx tag listen_mode listen_addr remote_host remote_port transport
+  local unit status color
+
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r idx tag listen_mode listen_addr remote_host remote_port transport <<< "${row}"
+    unit="$(realm_tag_to_unit "${tag}")"
+    status="$(systemctl is-active "${unit}" 2>/dev/null || echo inactive)"
+    color="$(realm_status_color "${status}")"
+
+    echo
+    printf "%b[%s] %s%b\n" \
+      "${C_BCYAN:-}${C_BOLD:-}" "${idx}" "${tag}" "${C_RESET:-}"
+
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "监听模式 :" "${C_RESET:-}" "${listen_mode}"
+
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "监听地址 :" "${C_RESET:-}" "${listen_addr}"
+
+    printf "%b%-10s%b %s:%s\n" \
+      "${C_BCYAN:-}" "目标地址 :" "${C_RESET:-}" "${remote_host}" "${remote_port}"
+
+    case "${transport}" in
+      tcp)  transport="仅 TCP" ;;
+      udp)  transport="仅 UDP" ;;
+      both) transport="TCP+UDP" ;;
+    esac
+
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "转发协议 :" "${C_RESET:-}" "${transport}"
+
+    printf "%b%-10s%b %b%s%b\n" \
+      "${C_BCYAN:-}" "服务状态 :" "${C_RESET:-}" \
+      "${color}" "${status}" "${C_RESET:-}"
+
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "服务单元 :" "${C_RESET:-}" "${unit}"
+
+    echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+  done
+
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
   pause_enter
 }
 
