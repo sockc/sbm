@@ -36,6 +36,8 @@ source "${BASE_DIR}/lib/uninstall.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/system_proxy.sh"
 
+source "${BASE_DIR}/lib/realm_relay.sh"
+
 init_colors() {
   if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
     C_RESET=$'\033[0m'
