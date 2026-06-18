@@ -150,19 +150,36 @@ PY
   }
 
   local realm_path
-  realm_path="$(find "${tmp_dir}" -type f -name realm | head -n1)"
+# 先看压缩包里到底有什么，便于排错
+if ! tar -tzf "${tmp_tar}" >/dev/null 2>&1; then
+  err "Realm 压缩包格式无效：${tmp_tar}"
+  pause_enter
+  return 1
+fi
 
-  if [ -z "${realm_path}" ] || [ ! -f "${realm_path}" ]; then
-    err "解压后未找到 realm 可执行文件"
-    pause_enter
-    return 1
-  fi
+realm_path="$(
+  find "${tmp_dir}" -type f \
+    \( -name 'realm' -o -name 'realm-*' \) \
+    ! -name '*.txt' \
+    ! -name '*.md' \
+    ! -name '*.sha256' \
+    ! -name '*.sha256sum' \
+    | head -n1
+)"
 
-  install -m 0755 "${realm_path}" "${REALM_BIN}" || {
-    err "安装 Realm 到 ${REALM_BIN} 失败"
-    pause_enter
-    return 1
-  }
+if [ -z "${realm_path}" ] || [ ! -f "${realm_path}" ]; then
+  echo "解压目录内容如下："
+  find "${tmp_dir}" -maxdepth 3 -type f | sed -n '1,50p'
+  err "解压后未找到 realm 可执行文件"
+  pause_enter
+  return 1
+fi
+
+install -m 0755 "${realm_path}" "${REALM_BIN}" || {
+  err "安装 Realm 到 ${REALM_BIN} 失败"
+  pause_enter
+  return 1
+}
 
   ok "Realm 安装完成：${REALM_BIN}"
   "${REALM_BIN}" --version 2>/dev/null || true
