@@ -220,12 +220,14 @@ inbound_runtime_status() {
   fi
 
   if inbound_port_is_listening "${network}" "${port}"; then
-    printf '%s\n' "正常"
-    return 0
+    rc=0
+  else
+    rc=$?
   fi
 
-  rc=$?
-  if [ "${rc}" -eq 2 ]; then
+  if [ "${rc}" -eq 0 ]; then
+    printf '%s\n' "正常"
+  elif [ "${rc}" -eq 2 ]; then
     printf '%s\n' "未知"
   else
     printf '%s\n' "未监听"
