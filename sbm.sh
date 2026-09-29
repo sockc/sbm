@@ -38,6 +38,8 @@ source "${BASE_DIR}/lib/system_proxy.sh"
 
 source "${BASE_DIR}/lib/realm_relay.sh"
 
+init_runtime_security
+
 init_colors() {
   if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
     C_RESET=$'\033[0m'
