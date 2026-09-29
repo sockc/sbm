@@ -86,7 +86,7 @@ ow_status() {
   echo "缓存节点    : ${nodes}"
   echo "当前出口    : ${current}"
   echo "代理模式    : ${mode}"
-  echo "Clash 面板  : ${panel}"
+  echo "Web 面板    : ${panel}"
 }
 
 ow_apply_simple_mode_file() {
@@ -277,7 +277,7 @@ ow_configure_source() {
   echo "节点       : ${count}"
   echo "代理模式   : $(ow_mode_label "${mode}")"
   echo "默认出口   : ${target}"
-  echo "Clash 面板 : 保持当前设置"
+  echo "Web 面板   : 保持当前设置"
   echo "================================="
   echo
   confirm_default_yes "确认应用吗？" || { warn "已取消"; pause_enter; return 0; }
@@ -421,7 +421,7 @@ menu_outbound_management() {
     echo "1. 快速配置"
     echo "2. 节点管理"
     echo "3. 路由策略"
-    echo "4. 面板管理"
+    echo "4. Web 面板"
     echo "5. 出站开关"
     echo "0. 返回"
     echo
