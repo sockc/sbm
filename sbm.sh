@@ -34,6 +34,8 @@ source "${BASE_DIR}/lib/clash_api.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/template.sh"
 # shellcheck disable=SC1091
+source "${BASE_DIR}/lib/outbound_wizard.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/uninstall.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/system_proxy.sh"
