@@ -17,11 +17,18 @@ cleanup_runtime_security() {
 }
 
 acquire_sbm_lock() {
-  local lock_file="/run/lock/sbm.lock"
-  [ -d /run/lock ] || lock_file="/tmp/sbm-global.lock"
+  local lock_file
+  if [ -d /run/lock ] && [ -w /run/lock ]; then
+    lock_file="/run/lock/sbm.lock"
+  else
+    lock_file="/tmp/sbm-${UID:-$(id -u)}.lock"
+  fi
 
   if has_cmd flock; then
-    exec 9>"${lock_file}"
+    if ! eval 'exec 9>"${lock_file}"'; then
+      err "无法创建 sbm 锁文件：${lock_file}"
+      return 1
+    fi
     if ! flock -n 9; then
       err "检测到另一个 sbm 实例正在运行，请先退出另一个会话后再试"
       return 1
@@ -50,6 +57,10 @@ init_runtime_security() {
 
   mkdir -p "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
   chmod 700 "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
+  [ -f "${CONFIG_DIR}/config.json" ] && chmod 600 "${CONFIG_DIR}/config.json" 2>/dev/null || true
+  [ -d "${INBOUND_META_DIR}" ] && find "${INBOUND_META_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
+  [ -d "${SOURCES_DIR}" ] && find "${SOURCES_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
+  [ -d "${NODE_CACHE_DIR}" ] && find "${NODE_CACHE_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
 
   acquire_sbm_lock || return 1
   trap cleanup_runtime_security EXIT
