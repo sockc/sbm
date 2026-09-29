@@ -120,6 +120,10509 @@ prompt_listen_port() {
   done
 }
 
+
+inbound_transport_for_type() {
+  case "$1" in
+    hysteria2|tuic) printf '%s\n' "udp" ;;
+    *) printf '%s\n' "tcp" ;;
+  esac
+}
+
+config_port_conflict() {
+  local port="$1"
+  local network="$2"
+  local exclude_tag="${3:-}"
+
+  [ -f "${CONFIG_DIR}/config.json" ] || return 1
+
+  python3 - "${CONFIG_DIR}/config.json" "${port}" "${network}" "${exclude_tag}" <<'PY'
+import json, sys
+
+path, port, network, exclude_tag = sys.argv[1:]
+port = int(port)
+
+try:
+    cfg = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+
+def networks_for(ib):
+    typ = str(ib.get("type", "") or "")
+    if typ in ("hysteria2", "tuic"):
+        return {"udp"}
+    if typ == "direct":
+        raw = str(ib.get("network", "") or "tcp,udp").lower()
+        if raw in ("both", "tcp+udp", "tcp,udp", ""):
+            return {"tcp", "udp"}
+        return {x.strip() for x in raw.replace("+", ",").split(",") if x.strip()}
+    return {"tcp"}
+
+wanted = {"tcp", "udp"} if network in ("both", "tcp+udp") else {network}
+for ib in cfg.get("inbounds", []):
+    tag = str(ib.get("tag", "") or "")
+    if exclude_tag and tag == exclude_tag:
+        continue
+    try:
+        ib_port = int(ib.get("listen_port", 0) or 0)
+    except Exception:
+        continue
+    if ib_port != port:
+        continue
+    if networks_for(ib) & wanted:
+        typ = str(ib.get("type", "") or "unknown")
+        print(f"{tag or '<未设置>'}\t{typ}")
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+system_port_conflict() {
+  local port="$1"
+  local network="$2"
+  local exclude_tag="${3:-}"
+  local proto output matches
+
+  if ! has_cmd ss; then
+    return 1
+  fi
+
+  for proto in tcp udp; do
+    case "${network}" in
+      tcp) [ "${proto}" = "tcp" ] || continue ;;
+      udp) [ "${proto}" = "udp" ] || continue ;;
+      both|tcp+udp) ;;
+      *) continue ;;
+    esac
+
+    if [ "${proto}" = "tcp" ]; then
+      output="$(ss -H -lntp 2>/dev/null || true)"
+    else
+      output="$(ss -H -lnup 2>/dev/null || true)"
+    fi
+
+    matches="$(printf '%s\n' "${output}" | grep -E ":${port}([[:space:]]|$)" || true)"
+    [ -n "${matches}" ] || continue
+
+    # 修改现有实例时，当前 sing-box 自己占用的旧端口不视为冲突。
+    if [ -n "${exclude_tag}" ]; then
+      local external
+      external="$(printf '%s\n' "${matches}" | grep -v 'sing-box' || true)"
+      [ -z "${external}" ] && continue
+      matches="${external}"
+    fi
+
+    printf '%s\n' "${proto}"
+  restart_singbox_service_safe
+}
+
+save_reality_meta() {
+  local reality_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local user_uuid="$5"
+  local flow="$6"
+  local server_name="$7"
+  local handshake_server="$8"
+  local handshake_port="$9"
+  local public_key="${10}"
+  local private_key="${11}"
+  local short_id="${12}"
+  local tcp_fast_open="${13}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${reality_tag}")"
+
+  python3 - "${meta_file}"     "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${user_uuid}" "${flow}" "${server_name}" "${handshake_server}"     "${handshake_port}" "${public_key}" "${private_key}" "${short_id}"     "${tcp_fast_open}" "${DEFAULT_CLIENT_FP}" <<'PY'
+import json, sys
+(
+    path, tag, host, port, user_name, uuid, flow, server_name,
+    handshake_server, handshake_port, public_key, private_key,
+    short_id, tcp_fast_open, fingerprint
+) = sys.argv[1:]
+data = {
+    "protocol": "vless-reality",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "flow": flow,
+    "server_name": server_name,
+    "handshake_server": handshake_server,
+    "handshake_port": int(handshake_port),
+    "public_key": public_key,
+    "private_key": private_key,
+    "short_id": short_id,
+    "tcp_fast_open": tcp_fast_open,
+    "type": "tcp",
+    "security": "reality",
+    "fingerprint": fingerprint,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vless_reality() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local reality_tag
+  local listen_addr listen_port user_name user_uuid
+  local server_name handshake_server handshake_port
+  local short_id keys private_key public_key
+  local connect_host tcp_fast_open tmp_file
+  local default_host flow
+
+  default_host="$(detect_default_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP"
+
+  reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_available_port "请输入监听端口" "443" "tcp" "${reality_tag}")"
+  user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
+  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
+  server_name="$(prompt_default "请输入伪装域名 server_name" "download.visualstudio.microsoft.com")"
+  handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手目标端口" "443")"
+  short_id="$(prompt_default "请输入 short_id" "$(gen_short_id)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  flow="xtls-rprx-vision"
+
+  if confirm_default_no "开启 TCP Fast Open 吗？"; then
+    tcp_fast_open="true"
+  else
+    tcp_fast_open="false"
+  fi
+
+  keys="$(gen_reality_keypair)" || {
+    pause_enter
+    return 1
+  }
+
+  private_key="${keys%%|*}"
+  public_key="${keys##*|}"
+
+  echo
+  echo "========== 配置预览 =========="
+  echo "实例标签       : ${reality_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${user_uuid}"
+  echo "server_name    : ${server_name}"
+  echo "握手目标       : ${handshake_server}:${handshake_port}"
+  echo "short_id       : ${short_id}"
+  echo "连接地址       : ${connect_host}"
+  echo "TCP Fast Open  : ${tcp_fast_open}"
+  echo "=============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${reality_tag}" "${listen_addr}" "${listen_port}" "${tcp_fast_open}" \
+    "${user_name}" "${user_uuid}" "${flow}" \
+    "${server_name}" "${handshake_server}" "${handshake_port}" \
+    "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+    path_cfg, reality_tag, listen_addr, listen_port, tcp_fast_open,
+    user_name, user_uuid, flow,
+    server_name, handshake_server, handshake_port,
+    private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+reality_obj = {
+    "type": "vless",
+    "tag": reality_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "tcp_fast_open": (tcp_fast_open == "true"),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": user_uuid,
+            "flow": flow
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "server_name": server_name,
+        "reality": {
+            "enabled": True,
+            "handshake": {
+                "server": handshake_server,
+                "server_port": int(handshake_port)
+            },
+            "private_key": private_key,
+            "short_id": [short_id]
+        }
+    }
+}
+
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == reality_tag:
+        inbounds[i] = reality_obj
+        break
+else:
+    inbounds.append(reality_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Reality 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${reality_tag}" "reality" "${listen_addr}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
+
+  ok "VLESS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${reality_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "流控        : ${flow}"
+  echo "传输        : tcp"
+  echo "TLS         : reality"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${reality_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS Reality URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_vless_reality() {
+  deploy_vless_reality
+}
+
+gen_password() {
+  if has_cmd openssl; then
+    openssl rand -hex 12
+    return 0
+  fi
+
+  if has_cmd python3; then
+    python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(18))
+PY
+    return 0
+  fi
+
+  echo "pass-$(date +%s)"
+}
+
+gen_self_signed_cert() {
+  local server_name="$1"
+  local cert_dir="${BASE_DIR}/certs"
+  local cert_path="${cert_dir}/hy2-selfsigned.crt"
+  local key_path="${cert_dir}/hy2-selfsigned.key"
+  local san tmp_conf
+
+  if ! has_cmd openssl; then
+    err "未找到 openssl，无法自动生成自签证书"
+    return 1
+  fi
+
+  mkdir -p "${cert_dir}" "${TMP_DIR}"
+
+  if is_valid_ip "${server_name}"; then
+    san="IP:${server_name}"
+  else
+    san="DNS:${server_name}"
+  fi
+
+  tmp_conf="${TMP_DIR}/openssl-hy2-selfsigned.cnf"
+
+  cat > "${tmp_conf}" <<EOF
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+CN = ${server_name}
+
+[v3_req]
+subjectAltName = ${san}
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+  if ! openssl req -x509 -nodes -newkey rsa:2048 \
+    -days 3650 \
+    -keyout "${key_path}" \
+    -out "${cert_path}" \
+    -config "${tmp_conf}" \
+    -extensions v3_req >/dev/null 2>&1; then
+    err "生成自签证书失败"
+    return 1
+  fi
+
+  chmod 600 "${key_path}" 2>/dev/null || true
+  chmod 644 "${cert_path}" 2>/dev/null || true
+
+  printf '%s|%s\n' "${cert_path}" "${key_path}"
+}
+
+prompt_port_default() {
+  local prompt="$1"
+  local default_port="$2"
+  local port
+
+  while true; do
+    port="$(prompt_default "${prompt}" "${default_port}")"
+    case "$port" in
+      ''|*[!0-9]*)
+        echo "输入无效：端口必须是 1-65535 的数字"
+        ;;
+      *)
+        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+          printf '%s\n' "$port"
+          return 0
+        fi
+        echo "输入无效：端口必须是 1-65535"
+        ;;
+    esac
+  done
+}
+
+ensure_inbound_meta_dir() {
+  mkdir -p "${INBOUND_META_DIR}"
+  chmod 700 "${INBOUND_META_DIR}" 2>/dev/null || true
+}
+
+inbound_meta_name_by_tag() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe='._-'))
+PY
+}
+
+inbound_meta_file_by_tag() {
+  local tag="$1"
+  local name
+  name="$(inbound_meta_name_by_tag "${tag}")"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${name}"
+}
+
+next_inbound_tag_by_prefix() {
+  local prefix="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${prefix}" <<'PY'
+import json, os, re, sys
+
+cfg_path, prefix = sys.argv[1], sys.argv[2]
+nums = []
+
+if os.path.exists(cfg_path):
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+    for ib in cfg.get("inbounds", []):
+        tag = str(ib.get("tag", ""))
+        m = re.fullmatch(re.escape(prefix) + r"-(\d{3})", tag)
+        if m:
+            nums.append(int(m.group(1)))
+
+n = 1
+while n in nums:
+    n += 1
+
+print(f"{prefix}-{n:03d}")
+PY
+}
+
+managed_inbound_rows() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+
+def label_for(ib):
+    typ = str(ib.get("type", "") or "")
+    tls = ib.get("tls", {}) or {}
+    if typ == "vless":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        if reality:
+            return "VLESS Reality"
+        if tls.get("enabled"):
+            return "VLESS TLS"
+        return "VLESS"
+    if typ == "hysteria2":
+        return "Hysteria2"
+    if typ == "vmess":
+        return "VMess TLS" if tls.get("enabled") else "VMess"
+    if typ == "tuic":
+        return "TUIC"
+    if typ == "anytls":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        return "AnyTLS Reality" if reality else "AnyTLS"
+    return typ or "<未知>"
+
+n = 0
+for ib in cfg.get("inbounds", []):
+    typ = str(ib.get("type", "") or "")
+    tag = str(ib.get("tag", "") or "")
+    if typ not in supported or not tag:
+        continue
+
+    n += 1
+    listen = str(ib.get("listen", "") or "")
+    port = str(ib.get("listen_port", "") or "")
+    if ":" in listen and not listen.startswith("["):
+        endpoint = f"[{listen}]:{port}" if port else f"[{listen}]"
+    else:
+        endpoint = f"{listen}:{port}" if port else (listen or "<空>")
+
+    users = ib.get("users", [])
+    user_count = len(users) if isinstance(users, list) else 0
+    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{user_count}")
+PY
+}
+
+managed_inbound_count() {
+  managed_inbound_rows | wc -l | tr -d ' '
+}
+
+show_managed_inbound_list() {
+  local service_state="inactive"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  echo "当前入站实例："
+  echo "编号 标签                     类型              监听地址                 用户"
+  echo "--------------------------------------------------------------------------------"
+
+  local found=0
+  while IFS=$'\t' read -r n tag _type label endpoint users; do
+    [ -z "${n}" ] && continue
+    found=1
+    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${users}"
+  done < <(managed_inbound_rows)
+
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无 SBM 管理的入站实例>"
+  fi
+
+  echo "--------------------------------------------------------------------------------"
+  echo "sing-box 服务：${service_state:-unknown}"
+}
+
+show_current_inbounds() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  pause_enter
+}
+
+get_managed_inbound_field_by_index() {
+  local idx="$1"
+  local field="$2"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" "${field}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+idx = int(sys.argv[2])
+field = sys.argv[3]
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+rows = [
+    ib for ib in cfg.get("inbounds", [])
+    if str(ib.get("type", "") or "") in supported and str(ib.get("tag", "") or "")
+]
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+ib = rows[idx - 1]
+if field == "tag":
+    print(str(ib.get("tag", "") or ""))
+elif field == "type":
+    print(str(ib.get("type", "") or ""))
+else:
+    raise SystemExit(1)
+PY
+}
+
+get_inbound_tag_by_index() {
+  get_managed_inbound_field_by_index "$1" "tag"
+}
+
+show_inbound_instance_detail() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tag = sys.argv[2]
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit(1)
+
+typ = str(ib.get("type", "") or "")
+listen = str(ib.get("listen", "") or "")
+port = str(ib.get("listen_port", "") or "")
+endpoint = f"[{listen}]:{port}" if ":" in listen and not listen.startswith("[") else f"{listen}:{port}"
+
+tls = ib.get("tls", {}) or {}
+reality = (tls.get("reality", {}) or {}).get("enabled") is True
+if typ == "vless":
+    label = "VLESS Reality" if reality else ("VLESS TLS" if tls.get("enabled") else "VLESS")
+elif typ == "hysteria2":
+    label = "Hysteria2"
+elif typ == "vmess":
+    label = "VMess TLS" if tls.get("enabled") else "VMess"
+elif typ == "tuic":
+    label = "TUIC"
+elif typ == "anytls":
+    label = "AnyTLS Reality" if reality else "AnyTLS"
+else:
+    label = typ
+
+users = ib.get("users", [])
+user_count = len(users) if isinstance(users, list) else 0
+server_name = str(tls.get("server_name", "") or "")
+network = str(ib.get("network", "") or "")
+transport = ib.get("transport", {}) or {}
+transport_type = str(transport.get("type", "") or "")
+
+print(f"实例标签 : {tag}")
+print(f"协议类型 : {label}")
+print(f"监听地址 : {endpoint}")
+print(f"用户数量 : {user_count}")
+if network:
+    print(f"网络类型 : {network}")
+if transport_type:
+    print(f"传输方式 : {transport_type}")
+if server_name:
+    print(f"SNI      : {server_name}")
+PY
+
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  if [ -f "${meta_file}" ]; then
+    echo "客户端信息: 已保存"
+  else
+    echo "客户端信息: 缺少元数据"
+  fi
+
+  local service_state="unknown"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+  echo "服务状态 : ${service_state}"
+}
+
+delete_legacy_inbound_meta_by_tag() {
+  local tag="$1"
+
+  case "${tag}" in
+    vless-reality-in|reality-*|reality*)
+      rm -f "${BASE_DIR}/reality-meta.json"
+      ;;
+    hy2-in|hy2-*|hy2*)
+      rm -f "${BASE_DIR}/hy2-meta.json"
+      ;;
+    vmess-in|vmess-*|vmess*)
+      rm -f "${BASE_DIR}/vmess-meta.json"
+      rm -rf "${BASE_DIR}/vmess-meta"
+      ;;
+    tuic-in|tuic-*|tuic*)
+      rm -f "${BASE_DIR}/tuic-meta.json"
+      ;;
+    trojan-in|trojan-*|trojan*)
+      rm -f "${BASE_DIR}/trojan-meta.json"
+      ;;
+  esac
+}
+
+delete_inbound_instance_by_tag() {
+  local tag="$1"
+  need_root
+  require_config_file || return 1
+  ensure_inbound_meta_dir
+
+  echo "准备删除入站实例：${tag}"
+  show_inbound_instance_detail "${tag}" || {
+    err "未找到入站实例：${tag}"
+    pause_enter
+    return 1
+  }
+  echo
+
+  if ! confirm_default_no "确认删除该实例吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  local tmp_file meta_file
+  tmp_file="${TMP_DIR}/config.delete-inbound.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+path_cfg, tag = sys.argv[1:]
+cfg = json.load(open(path_cfg, "r", encoding="utf-8"))
+inbounds = cfg.get("inbounds", [])
+
+before = len(inbounds)
+inbounds = [ib for ib in inbounds if str(ib.get("tag", "") or "") != tag]
+if len(inbounds) == before:
+    raise SystemExit(1)
+
+cfg["inbounds"] = inbounds
+with open(path_cfg, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除入站实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败；如存在上一份配置，已尝试自动回滚"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+  delete_legacy_inbound_meta_by_tag "${tag}"
+
+  ok "已删除入站实例：${tag}"
+  pause_enter
+}
+
+delete_inbound_instance() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  echo
+
+  local idx tag
+  idx="$(prompt_required "请输入要删除的入站编号")"
+  tag="$(get_managed_inbound_field_by_index "${idx}" "tag" 2>/dev/null || true)"
+  if [ -z "${tag}" ]; then
+    err "入站编号无效"
+    pause_enter
+    return 1
+  fi
+
+  delete_inbound_instance_by_tag "${tag}"
+}
+
+menu_inbound_instance_detail() {
+  local tag="$1"
+  local typ="$2"
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_inbound_instance_detail "${tag}" || {
+      err "实例已不存在：${tag}"
+      pause_enter
+      return
+    }
+    echo "--------------------------------------"
+    echo "1. 查看详情"
+    echo "2. 导出客户端配置"
+    if [ "${typ}" = "vless" ]; then
+      echo "3. 用户管理"
+    else
+      echo "3. 用户管理（仅 VLESS）"
+    fi
+    echo "4. 删除实例"
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1)
+        clear
+        echo "======================================"
+        echo "              实例详情"
+        echo "======================================"
+        show_inbound_instance_detail "${tag}"
+        pause_enter
+        ;;
+      2)
+        export_inbound_instance_by_tag "${tag}" "${typ}"
+        ;;
+      3)
+        if [ "${typ}" = "vless" ]; then
+          menu_vless_user_management_for_tag "${tag}"
+        else
+          warn "当前协议暂不支持独立用户管理"
+          pause_enter
+        fi
+        ;;
+      4)
+        delete_inbound_instance_by_tag "${tag}"
+        return
+        ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_inbound_instance_management() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_managed_inbound_list
+    echo
+    echo "a. 导出全部 URI"
+    echo "0. 返回"
+    echo
+
+    local choice tag typ
+    read -r -p "请选择实例编号 / a / 0: " choice
+    case "${choice:-}" in
+      0) return ;;
+      a|A)
+        export_all_uris
+        ;;
+      ''|*[!0-9]*)
+        echo "无效选项"
+        sleep 1
+        ;;
+      *)
+        tag="$(get_managed_inbound_field_by_index "${choice}" "tag" 2>/dev/null || true)"
+        typ="$(get_managed_inbound_field_by_index "${choice}" "type" 2>/dev/null || true)"
+        if [ -z "${tag}" ] || [ -z "${typ}" ]; then
+          err "实例编号无效"
+          sleep 1
+          continue
+        fi
+        menu_inbound_instance_detail "${tag}" "${typ}"
+        ;;
+    esac
+  done
+}
+
+
+save_hy2_meta() {
+  local hy2_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local password="$5"
+  local server_name="$6"
+  local obfs_password="$7"
+  local up_mbps="$8"
+  local down_mbps="$9"
+  local cert_mode="${10}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${hy2_tag}")"
+
+  python3 - "${meta_file}"     "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${password}" "${server_name}" "${obfs_password}" "${up_mbps}"     "${down_mbps}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, password, server_name, obfs_password, up_mbps, down_mbps, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "hysteria2",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "password": password,
+    "server_name": server_name,
+    "cert_mode": cert_mode,
+    "obfs_password": obfs_password,
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_hysteria2() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local hy2_tag
+  local listen_addr listen_port user_name password
+  local cert_path key_path connect_host server_name
+  local up_mbps down_mbps obfs_password use_obfs
+  local cert_mode default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  hy2_tag="$(prompt_default "请输入 Hysteria2 实例标签" "$(next_inbound_tag_by_prefix "hy2")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_available_port "请输入 Hysteria2 监听端口" "8443" "udp" "${hy2_tag}")"
+  user_name="$(prompt_default "请输入 Hysteria2 用户备注" "${hy2_tag}")"
+  password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  up_mbps="$(prompt_default "请输入上行带宽 up_mbps" "100")"
+  down_mbps="$(prompt_default "请输入下行带宽 down_mbps" "100")"
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  if confirm_default_no "启用 salamander obfs 吗？"; then
+    use_obfs="true"
+    obfs_password="$(prompt_default "请输入 obfs 密码" "$(gen_password)")"
+  else
+    use_obfs="false"
+    obfs_password=""
+  fi
+
+  echo
+  echo "========== Hysteria2 配置预览 =========="
+  echo "实例标签       : ${hy2_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "客户端 SNI     : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "up_mbps        : ${up_mbps}"
+  echo "down_mbps      : ${down_mbps}"
+  echo "obfs           : ${use_obfs}"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs_password  : ${obfs_password}"
+  fi
+  echo "========================================"
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.hy2.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${hy2_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${password}" \
+    "${cert_path}" "${key_path}" "${up_mbps}" "${down_mbps}" \
+    "${use_obfs}" "${obfs_password}" <<'PY'
+import json, sys
+
+(
+    path_cfg, hy2_tag, listen_addr, listen_port, user_name, password,
+    cert_path, key_path, up_mbps, down_mbps,
+    use_obfs, obfs_password
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+hy2_obj = {
+    "type": "hysteria2",
+    "tag": hy2_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+    "users": [
+        {
+            "name": user_name,
+            "password": password
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+if use_obfs == "true":
+    hy2_obj["obfs"] = {
+        "type": "salamander",
+        "password": obfs_password
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == hy2_tag:
+        inbounds[i] = hy2_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(hy2_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Hysteria2 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_hy2_meta "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
+
+  ok "Hysteria2 部署完成"
+  echo
+  echo "------ Hysteria2 客户端关键参数 ------"
+  echo "实例标签    : ${hy2_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "用户名备注  : ${user_name}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "协议        : hysteria2"
+  echo "传输        : UDP / QUIC"
+  echo "up/down     : ${up_mbps}/${down_mbps} Mbps"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs        : salamander"
+    echo "obfs密码    : ${obfs_password}"
+  fi
+  echo "--------------------------------------"
+  echo
+
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式    : 自签证书"
+    echo "客户端建议  :"
+    echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
+    echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
+    echo "自签证书路径: ${cert_path}"
+  else
+    echo "证书模式    : 正式证书"
+    echo "客户端建议  : 正常校验证书即可"
+  fi
+  echo
+  echo "注意：如果你用官方 Hysteria2 客户端，常见的 userpass 实际要填成 <用户名>:<密码> 的组合。"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local hy2_meta hy2_uri
+  hy2_meta="$(inbound_meta_file_by_tag "${hy2_tag}")"
+  hy2_uri="$(build_hy2_uri "${hy2_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "Hysteria2 URI" "${hy2_uri}"
+
+  pause_enter
+}
+
+menu_deploy_hysteria2() {
+  deploy_hysteria2
+}
+
+gen_uuid_value() {
+  if has_cmd sing-box; then
+    sing-box generate uuid 2>/dev/null && return 0
+  fi
+
+  if has_cmd uuidgen; then
+    uuidgen | tr 'A-Z' 'a-z'
+    return 0
+  fi
+
+  python3 - <<'PY'
+import uuid
+print(str(uuid.uuid4()))
+PY
+}
+
+gen_random_path() {
+  if has_cmd openssl; then
+    echo "/$(openssl rand -hex 4)"
+    return 0
+  fi
+
+  python3 - <<'PY'
+import secrets
+print("/" + secrets.token_hex(4))
+PY
+}
+
+save_vmess_meta() {
+  local vmess_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local transport_type="$6"
+  local tls_enabled="$7"
+  local server_name="$8"
+  local path="$9"
+  local host="${10}"
+  local method="${11}"
+  local cert_mode="${12}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${vmess_tag}")"
+
+  python3 - "${meta_file}"     "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}"     "${path}" "${host}" "${method}" "${cert_mode}" <<'PY'
+import json, sys
+path_out, tag, connect_host, port, user_name, uuid, transport_type, tls_enabled, server_name, ws_path, host, method, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "vmess",
+    "tag": tag,
+    "connect_host": connect_host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "transport_type": transport_type,
+    "tls_enabled": tls_enabled,
+    "server_name": server_name,
+    "path": ws_path,
+    "host": host,
+    "method": method,
+    "cert_mode": cert_mode,
+}
+with open(path_out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vmess() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+
+  local transport_choice transport_type tls_choice tls_enabled cert_mode
+  local listen_addr listen_port user_name uuid vmess_tag
+  local connect_host server_name cert_path key_path
+  local path host method default_host tmp_file backend cert_pair default_tag_prefix
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  echo
+  echo "请选择 VMess 传输方式："
+  echo "1. HTTP"
+  echo "2. WebSocket"
+  read -r -p "请选择 [1-2]（默认 2）: " transport_choice
+  transport_choice="${transport_choice:-2}"
+
+  case "${transport_choice}" in
+    1)
+      transport_type="http"
+      default_tag_prefix="vmess-http"
+      ;;
+    2)
+      transport_type="ws"
+      default_tag_prefix="vmess-ws"
+      ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  vmess_tag="$(prompt_default "请输入 VMess 实例标签" "$(next_inbound_tag_by_prefix "${default_tag_prefix}")")"
+
+  echo
+  echo "是否启用 TLS："
+  echo "1. 开启"
+  echo "2. 关闭"
+  read -r -p "请选择 [1-2]（默认 2）: " tls_choice
+  tls_choice="${tls_choice:-2}"
+
+  case "${tls_choice}" in
+    1) tls_enabled="true" ;;
+    2) tls_enabled="false" ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  listen_addr="$(prompt_listen_addr)"
+  if [ "${tls_enabled}" = "true" ]; then
+    listen_port="$(prompt_available_port "请输入 VMess 监听端口" "443" "tcp" "${vmess_tag}")"
+  else
+    if [ "${transport_type}" = "http" ]; then
+      listen_port="$(prompt_available_port "请输入 VMess 监听端口" "8080" "tcp" "${vmess_tag}")"
+    else
+      listen_port="$(prompt_available_port "请输入 VMess 监听端口" "80" "tcp" "${vmess_tag}")"
+    fi
+  fi
+
+  user_name="$(prompt_default "请输入 VMess 用户备注" "${vmess_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+
+  if [ "${transport_type}" = "http" ]; then
+    path="$(prompt_default "请输入 HTTP path" "/")"
+    host="$(prompt_default "请输入 HTTP host（留空为不设置）" "")"
+    method="$(prompt_default "请输入 HTTP method" "GET")"
+  else
+    path="$(prompt_default "请输入 WebSocket path" "$(gen_random_path)")"
+    host="$(prompt_default "请输入 WS Host 头（留空为不设置）" "")"
+    method=""
+  fi
+
+  server_name=""
+  cert_path=""
+  key_path=""
+  cert_mode="0"
+
+  if [ "${tls_enabled}" = "true" ]; then
+    server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+    echo
+    echo "证书模式："
+    echo "1. 正式证书"
+    echo "2. 自签证书"
+    read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+    cert_mode="${cert_mode:-1}"
+
+    if [ "${cert_mode}" = "2" ]; then
+      cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+        pause_enter
+        return 1
+      }
+      cert_path="${cert_pair%%|*}"
+      key_path="${cert_pair##*|}"
+
+      echo
+      echo "已自动生成自签证书："
+      echo "certificate_path : ${cert_path}"
+      echo "key_path         : ${key_path}"
+      echo
+    else
+      cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+      key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+    fi
+
+    if [ ! -f "${cert_path}" ]; then
+      err "证书文件不存在：${cert_path}"
+      pause_enter
+      return 1
+    fi
+
+    if [ ! -f "${key_path}" ]; then
+      err "私钥文件不存在：${key_path}"
+      pause_enter
+      return 1
+    fi
+  fi
+
+  echo
+  echo "========== VMess 配置预览 =========="
+  echo "实例标签       : ${vmess_tag}"
+  echo "传输方式       : ${transport_type}"
+  echo "TLS            : ${tls_enabled}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "alterId        : 0"
+  echo "path           : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host      : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method         : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "server_name    : ${server_name}"
+    if [ "${cert_mode}" = "2" ]; then
+      echo "证书模式       : 自签证书"
+    else
+      echo "证书模式       : 正式证书"
+    fi
+    echo "证书路径       : ${cert_path}"
+    echo "私钥路径       : ${key_path}"
+  fi
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.vmess.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${vmess_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
+    "${transport_type}" "${path}" "${host}" "${method}" \
+    "${tls_enabled}" "${server_name}" "${cert_path}" "${key_path}" <<'PY'
+import json, sys
+
+(
+    path_cfg, vmess_tag, listen_addr, listen_port, user_name, uuid,
+    transport_type, req_path, host, method,
+    tls_enabled, server_name, cert_path, key_path
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+vmess_obj = {
+    "type": "vmess",
+    "tag": vmess_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "alterId": 0
+        }
+    ]
+}
+
+if transport_type == "http":
+    transport = {
+        "type": "http",
+        "path": req_path,
+        "method": method or "GET"
+    }
+    if host:
+        transport["host"] = [host]
+elif transport_type == "ws":
+    transport = {
+        "type": "ws",
+        "path": req_path
+    }
+    if host:
+        transport["headers"] = {"Host": host}
+else:
+    raise SystemExit("unknown transport type")
+
+vmess_obj["transport"] = transport
+
+if tls_enabled == "true":
+    vmess_obj["tls"] = {
+        "enabled": True,
+        "server_name": server_name,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == vmess_tag:
+        inbounds[i] = vmess_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(vmess_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VMess 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vmess_meta "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
+
+  ok "VMess 部署完成"
+  echo
+  echo "------ VMess 客户端关键参数 ------"
+  echo "实例标签    : ${vmess_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "alterId     : 0"
+  echo "传输        : ${transport_type}"
+  echo "path        : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host   : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method      : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "TLS         : enabled"
+    echo "SNI         : ${server_name}"
+  else
+    echo "TLS         : disabled"
+  fi
+  echo "----------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local vmess_meta vmess_uri
+  vmess_meta="$(inbound_meta_file_by_tag "${vmess_tag}")"
+  vmess_uri="$(build_vmess_uri "${vmess_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "VMess URI" "${vmess_uri}"
+
+  pause_enter
+}
+
+menu_deploy_vmess() {
+  deploy_vmess
+}
+
+save_tuic_meta() {
+  local tuic_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local password="$6"
+  local server_name="$7"
+  local congestion_control="$8"
+  local zero_rtt_handshake="$9"
+  local heartbeat="${10}"
+  local cert_mode="${11}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tuic_tag}")"
+
+  python3 - "${meta_file}"     "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${password}" "${server_name}" "${congestion_control}"     "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, uuid, password, server_name, congestion, zero_rtt, heartbeat, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "tuic",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "password": password,
+    "server_name": server_name,
+    "congestion_control": congestion,
+    "zero_rtt_handshake": zero_rtt,
+    "heartbeat": heartbeat,
+    "cert_mode": cert_mode,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_tuic() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local tuic_tag
+  local listen_addr listen_port user_name uuid password
+  local connect_host server_name cert_path key_path cert_mode
+  local congestion_control zero_rtt_choice zero_rtt_handshake
+  local heartbeat default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  tuic_tag="$(prompt_default "请输入 TUIC 实例标签" "$(next_inbound_tag_by_prefix "tuic")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_available_port "请输入 TUIC 监听端口" "443" "udp" "${tuic_tag}")"
+  user_name="$(prompt_default "请输入 TUIC 用户备注" "${tuic_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  echo "请选择 congestion_control："
+  echo "1. cubic"
+  echo "2. new_reno"
+  echo "3. bbr"
+  read -r -p "请选择 [1-3]（默认 1）: " congestion_control
+  case "${congestion_control:-1}" in
+    1) congestion_control="cubic" ;;
+    2) congestion_control="new_reno" ;;
+    3) congestion_control="bbr" ;;
+    *) congestion_control="cubic" ;;
+  esac
+
+  echo
+  echo "是否开启 zero_rtt_handshake："
+  echo "1. 关闭（推荐）"
+  echo "2. 开启"
+  read -r -p "请选择 [1-2]（默认 1）: " zero_rtt_choice
+  case "${zero_rtt_choice:-1}" in
+    1) zero_rtt_handshake="false" ;;
+    2) zero_rtt_handshake="true" ;;
+    *) zero_rtt_handshake="false" ;;
+  esac
+
+  heartbeat="$(prompt_default "请输入 heartbeat（默认 10s）" "10s")"
+
+  echo
+  echo "========== TUIC 配置预览 =========="
+  echo "实例标签       : ${tuic_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "SNI            : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "congestion     : ${congestion_control}"
+  echo "zero_rtt       : ${zero_rtt_handshake}"
+  echo "heartbeat      : ${heartbeat}"
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.tuic.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tuic_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
+    "${cert_path}" "${key_path}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" <<'PY'
+import json, sys
+
+(
+    path_cfg, tuic_tag, listen_addr, listen_port, user_name, uuid, password,
+    cert_path, key_path, congestion_control, zero_rtt_handshake, heartbeat
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+tuic_obj = {
+    "type": "tuic",
+    "tag": tuic_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "password": password
+        }
+    ],
+    "congestion_control": congestion_control,
+    "zero_rtt_handshake": (zero_rtt_handshake == "true"),
+    "heartbeat": heartbeat,
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == tuic_tag:
+        inbounds[i] = tuic_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(tuic_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 TUIC 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_tuic_meta "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
+
+  ok "TUIC 部署完成"
+  echo
+  echo "------ TUIC 客户端关键参数 ------"
+  echo "实例标签    : ${tuic_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "congestion  : ${congestion_control}"
+  echo "zero_rtt    : ${zero_rtt_handshake}"
+  echo "heartbeat   : ${heartbeat}"
+  echo "--------------------------------"
+  echo
+
+  if [ "${zero_rtt_handshake}" = "true" ]; then
+    echo "警告：zero_rtt_handshake 已开启，存在重放攻击风险，不推荐长期使用。"
+    echo
+  fi
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local tuic_meta tuic_uri
+  tuic_meta="$(inbound_meta_file_by_tag "${tuic_tag}")"
+  tuic_uri="$(build_tuic_uri "${tuic_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "TUIC URI" "${tuic_uri}"
+
+  pause_enter
+}
+
+menu_deploy_tuic() {
+  deploy_tuic
+}
+
+# ---------------------------
+# AnyTLS helpers
+# ---------------------------
+
+detect_default_connect_host() {
+  local host=""
+
+  # 优先取 IPv4
+  if has_cmd curl; then
+    host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  elif has_cmd wget; then
+    host="$(wget -4 -qO- --timeout=5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+
+  host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+
+  # 再兜底
+  if [ -z "${host}" ]; then
+    host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+  fi
+
+  [ -z "${host}" ] && host="127.0.0.1"
+  printf '%s\n' "${host}"
+}
+
+anytls_rand_port() {
+  python3 - <<'PY'
+import random
+print(random.randint(20000, 50000))
+PY
+}
+
+anytls_rand_password() {
+  python3 - <<'PY'
+import secrets, base64
+raw = secrets.token_bytes(18)
+print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+PY
+}
+
+anytls_rand_short_id() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(4))
+PY
+}
+
+anytls_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_anytls_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local password="$7"
+  local server_name="$8"
+  local cert_mode="$9"
+  local certificate_path="${10}"
+  local key_path="${11}"
+  local reality_public_key="${12}"
+  local reality_private_key="${13}"
+  local reality_short_id="${14}"
+  local handshake_server="${15}"
+  local handshake_port="${16}"
+  local utls_fingerprint="${17:-chrome}"
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" "${utls_fingerprint}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, password, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port, utls_fingerprint
+) = sys.argv[1:]
+
+data = {
+  "protocol": "anytls",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "password": password,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_enabled": mode == "reality",
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443,
+  "utls_fingerprint": utls_fingerprint
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_anytls_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+generate_anytls_reality_keypair() {
+  local out priv pub
+
+  if ! has_cmd sing-box; then
+    err "未找到 sing-box，无法生成 Reality 密钥"
+    return 1
+  fi
+
+  out="$(sing-box generate reality-keypair 2>/dev/null)" || return 1
+  priv="$(printf '%s\n' "${out}" | awk -F': ' '/Private/ {print $2; exit}')"
+  pub="$(printf '%s\n' "${out}" | awk -F': ' '/Public/  {print $2; exit}')"
+
+  if [ -z "${priv}" ] || [ -z "${pub}" ]; then
+    return 1
+  fi
+
+  printf '%s|%s\n' "${priv}" "${pub}"
+}
+
+deploy_anytls_tls() {
+  need_root
+
+  local cert_mode="$1"  # 1=正式证书 2=自签证书
+  local tag listen listen_port user_name password connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_anytls_self_signed_cert "${tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.anytls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, password, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443" "chrome"
+
+  ok "AnyTLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "证书模式    : $([ "${cert_mode}" = "1" ] && echo 正式证书 || echo 自签证书)"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "----------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+deploy_anytls_reality() {
+  need_root
+
+  local tag listen listen_port user_name password connect_host server_name
+  local handshake_server handshake_port short_id keypair private_key public_key tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI")"
+  handshake_server="$(prompt_default "请输入 Reality 握手域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手端口" "443")"
+  short_id="$(prompt_default "请输入 Reality short_id" "$(anytls_rand_short_id)")"
+
+  keypair="$(generate_anytls_reality_keypair)" || {
+    err "生成 Reality 密钥失败"
+    pause_enter
+    return 1
+  }
+  private_key="${keypair%%|*}"
+  public_key="${keypair##*|}"
+
+  tmp_file="${TMP_DIR}/config.anytls.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${handshake_server}" "${handshake_port}" "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+  cfg_path, tag, listen, listen_port, user_name, password,
+  handshake_server, handshake_port, private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "reality": {
+      "enabled": True,
+      "handshake": {
+        "server": handshake_server,
+        "server_port": int(handshake_port)
+      },
+      "private_key": private_key,
+      "short_id": [short_id]
+    }
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS + Reality 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}" "chrome"
+
+  ok "AnyTLS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "握手域名    : ${handshake_server}:${handshake_port}"
+  echo "uTLS 指纹   : chrome"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS + Reality 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "--------------------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_anytls() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             AnyTLS 入站"
+    echo "======================================"
+    echo "1. AnyTLS（正式证书）"
+    echo "2. AnyTLS（自签证书）"
+    echo "3. AnyTLS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_anytls_tls "1" ;;
+      2) deploy_anytls_tls "2" ;;
+      3) deploy_anytls_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+vless_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_vless_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local user_uuid="$7"
+  local flow="$8"
+  local server_name="$9"
+  local cert_mode="${10}"
+  local certificate_path="${11}"
+  local key_path="${12}"
+  local reality_public_key="${13}"
+  local reality_private_key="${14}"
+  local reality_short_id="${15}"
+  local handshake_server="${16}"
+  local handshake_port="${17}"
+
+  local meta_file
+  meta_file="$(vless_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, user_uuid, flow, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port
+) = sys.argv[1:]
+
+data = {
+  "protocol": "vless",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "user_uuid": user_uuid,
+  "flow": flow,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_vless_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+menu_deploy_vless() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              VLESS 入站"
+    echo "======================================"
+    echo "1. VLESS + TLS（正式证书）"
+    echo "2. VLESS + TLS（自签证书）"
+    echo "3. VLESS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_vless_tls "1" ;;
+      2) deploy_vless_tls "2" ;;
+      3) deploy_vless_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+deploy_vless_tls() {
+  need_root
+
+  local cert_mode="$1"   # 1=正式证书 2=自签证书
+  local vless_tag listen listen_port user_name user_uuid connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  vless_tag="$(prompt_default "请输入 VLESS 实例标签" "vless-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 VLESS 监听端口" "$(random_port)" "tcp" "${vless_tag}")"
+  user_name="$(prompt_default "请输入 VLESS 用户备注" "vless-user1")"
+  user_uuid="$(prompt_default "请输入 VLESS UUID" "$(gen_uuid)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_vless_self_signed_cert "${vless_tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.vless.tls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${vless_tag}" "${listen}" "${listen_port}" "${user_name}" "${user_uuid}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, user_uuid, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "vless",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "uuid": user_uuid
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    break
+else:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VLESS + TLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${vless_tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443"
+
+  ok "VLESS + TLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${vless_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "传输        : tcp"
+  echo "TLS         : tls"
+  echo "SNI         : ${server_name}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${vless_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_inbound_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              入站管理"
+    echo "======================================"
+    echo "1. 部署/重装 VLESS"
+    echo "2. 部署/重装 Hysteria2"
+    echo "3. 部署/重装 VMess"
+    echo "4. 部署/重装 TUIC"
+    echo "5. 部署/重装 AnyTLS"
+    echo "6. 中转管理"
+    echo "7. 入站实例管理"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-7]: " choice
+    case "${choice:-}" in
+      1) menu_deploy_vless ;;
+      2) menu_deploy_hysteria2 ;;
+      3) menu_deploy_vmess ;;
+      4) menu_deploy_tuic ;;
+      5) menu_deploy_anytls ;;
+      6) menu_relay_management ;;
+      7) menu_inbound_instance_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+# =========================
+# Direct Relay / 固定目标中转
+# =========================
+
+save_direct_relay_meta() {
+  local relay_tag="$1"
+  local listen_addr="$2"
+  local listen_port="$3"
+  local network="$4"
+  local target_host="$5"
+  local target_port="$6"
+  local route_outbound="$7"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${relay_tag}")"
+
+  python3 - "${meta_file}"     "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}"     "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+path, tag, listen, listen_port, network, target_host, target_port, route_outbound = sys.argv[1:]
+data = {
+    "protocol": "direct-relay",
+    "tag": tag,
+    "listen": listen,
+    "listen_port": int(listen_port),
+    "network": network,
+    "target_host": target_host,
+    "target_port": int(target_port),
+    "route_outbound": route_outbound,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+prompt_relay_network() {
+  local choice
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 1=仅 TCP）: " choice
+
+    case "${choice:-1}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+
+list_route_outbound_candidates() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+rows = []
+seen = set()
+
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag:
+        continue
+    if tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append((tag, typ or "unknown"))
+        seen.add(tag)
+
+# 没有 direct 就补一个，保证中转机至少能 direct 出去
+if not has_direct:
+    rows.insert(0, ("direct", "direct"))
+
+for i, (tag, typ) in enumerate(rows, 1):
+    print(f"{i}\t{tag}\t{typ}")
+PY
+}
+
+get_route_outbound_by_index() {
+  local idx="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+seen = set()
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag or tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append(tag)
+        seen.add(tag)
+
+if not has_direct:
+    rows.insert(0, "direct")
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+select_route_outbound_tag() {
+  require_config_file || return 1
+
+  local found=0
+  echo >&2
+  echo "可选出口：" >&2
+  echo "编号 标签                     类型" >&2
+  echo "--------------------------------------------------------" >&2
+  while IFS=$'\t' read -r idx tag typ; do
+    [ -z "${idx}" ] && continue
+    found=1
+    printf '%-4s %-24s %s\n' "${idx}" "${tag}" "${typ}" >&2
+  done < <(list_route_outbound_candidates)
+  echo "--------------------------------------------------------" >&2
+
+  if [ "${found}" -eq 0 ]; then
+    warn "未检测到现有 outbound，已自动回退到 direct" >&2
+    printf '%s\n' "direct"
+    return 0
+  fi
+
+  local idx tag
+  read -r -p "请输入出口编号 [默认: 1]: " idx
+  idx="${idx:-1}"
+
+  tag="$(get_route_outbound_by_index "${idx}")" || {
+    err "编号无效" >&2
+    return 1
+  }
+
+  printf '%s\n' "${tag}"
+}
+
+relay_fw_allowed_for_proto() {
+  local port="$1"
+  local proto="$2"
+  local backend
+
+  if ! declare -F detect_firewall_backend >/dev/null 2>&1; then
+    return 2
+  fi
+
+  backend="$(detect_firewall_backend 2>/dev/null || echo none)"
+
+  case "${backend}" in
+    ufw)
+      if ufw status 2>/dev/null | grep -Eiq "(^|[[:space:]])${port}/${proto}([[:space:]]|$).*ALLOW"; then
+        return 0
+      fi
+      return 1
+      ;;
+    firewalld)
+      if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/${proto}"; then
+        return 0
+      fi
+      return 1
+      ;;
+    iptables)
+      if iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+relay_fw_status_text() {
+  local port="$1"
+  local network="$2"
+
+  local tcp_rc udp_rc
+  tcp_rc=2
+  udp_rc=2
+
+  case "${network}" in
+    tcp)
+      relay_fw_allowed_for_proto "${port}" "tcp"
+      case "$?" in
+        0) printf '%s\n' "tcp 已放行" ;;
+        1) printf '%s\n' "tcp 未放行" ;;
+        *) printf '%s\n' "tcp 未知" ;;
+      esac
+      ;;
+    udp)
+      relay_fw_allowed_for_proto "${port}" "udp"
+      case "$?" in
+        0) printf '%s\n' "udp 已放行" ;;
+        1) printf '%s\n' "udp 未放行" ;;
+        *) printf '%s\n' "udp 未知" ;;
+      esac
+      ;;
+    ""|tcp+udp)
+      relay_fw_allowed_for_proto "${port}" "tcp"; tcp_rc="$?"
+      relay_fw_allowed_for_proto "${port}" "udp"; udp_rc="$?"
+
+      if [ "${tcp_rc}" = "0" ] && [ "${udp_rc}" = "0" ]; then
+        printf '%s\n' "tcp/udp 已放行"
+      elif [ "${tcp_rc}" = "1" ] && [ "${udp_rc}" = "1" ]; then
+        printf '%s\n' "tcp/udp 未放行"
+      elif [ "${tcp_rc}" = "2" ] || [ "${udp_rc}" = "2" ]; then
+        printf '%s\n' "tcp/udp 未知"
+      else
+        printf '%s\n' "tcp/udp 部分放行"
+      fi
+      ;;
+    *)
+      printf '%s\n' "未知"
+      ;;
+  esac
+}
+
+relay_status_color() {
+  case "${1:-}" in
+    *已放行*|active|running)
+      printf "%s" "${C_BGREEN:-}"
+      ;;
+    *部分放行*|*未放行*|inactive|degraded)
+      printf "%s" "${C_BYELLOW:-${C_YELLOW:-}}"
+      ;;
+    *未知*|unknown)
+      printf "%s" "${C_BCYAN:-}"
+      ;;
+    *)
+      printf "%s" "${C_RESET:-}"
+      ;;
+  esac
+}
+
+show_current_relays() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  local svc_status="unknown"
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  local -a relay_rows=()
+  mapfile -t relay_rows < <(
+    python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+route_rules = cfg.get("route", {}).get("rules", [])
+relay_route = {}
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    outbound = r.get("outbound", "")
+    if isinstance(inbound, str):
+        relay_route[inbound] = outbound
+    elif isinstance(inbound, list):
+        for x in inbound:
+            if isinstance(x, str):
+                relay_route[x] = outbound
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+
+    tag = str(ib.get("tag", "") or "<未设置>")
+    network = str(ib.get("network", "") or "tcp+udp")
+    listen = str(ib.get("listen", "") or "<空>")
+    listen_port = str(ib.get("listen_port", "") or "<空>")
+    target_host = str(ib.get("override_address", "") or "<空>")
+    target_port = str(ib.get("override_port", "") or "<空>")
+    outbound = str(relay_route.get(str(ib.get("tag", "") or ""), "") or "<未指定>")
+
+    print("\t".join([tag, network, listen, listen_port, target_host, target_port, outbound]))
+PY
+  )
+
+  clear
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  echo "${C_BMAGENTA:-}            中转实例状态${C_RESET:-}"
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  printf "%b%-10s%b %b%s%b\n" \
+    "${C_BCYAN:-}" "服务状态 :" "${C_RESET:-}" \
+    "$(relay_status_color "${svc_status}")" "${svc_status:-unknown}" "${C_RESET:-}"
+  printf "%b%-10s%b %s\n" \
+    "${C_BCYAN:-}" "实例数量 :" "${C_RESET:-}" "${#relay_rows[@]}"
+  echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+
+  if [ "${#relay_rows[@]}" -eq 0 ]; then
+    echo "暂无中转实例"
+    echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+    pause_enter
+    return 0
+  fi
+
+  local idx=1
+  local row tag network listen listen_port target_host target_port outbound fw_status fw_color
+  for row in "${relay_rows[@]}"; do
+    IFS=$'\t' read -r tag network listen listen_port target_host target_port outbound <<< "${row}"
+    fw_status="$(relay_fw_status_text "${listen_port}" "${network}")"
+    fw_color="$(relay_status_color "${fw_status}")"
+
+    echo
+    printf "%b[%d] %s%b\n" "${C_BCYAN:-}${C_BOLD:-}" "${idx}" "${tag}" "${C_RESET:-}"
+    printf "%b%-10s%b %s:%s (%s)\n" \
+      "${C_BCYAN:-}" "监听 :" "${C_RESET:-}" \
+      "${listen}" "${listen_port}" "${network}"
+    printf "%b%-10s%b %s:%s\n" \
+      "${C_BCYAN:-}" "目标 :" "${C_RESET:-}" \
+      "${target_host}" "${target_port}"
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "出口 :" "${C_RESET:-}" \
+      "${outbound}"
+    printf "%b%-10s%b %b%s%b\n" \
+      "${C_BCYAN:-}" "防火墙 :" "${C_RESET:-}" \
+      "${fw_color}" "${fw_status}" "${C_RESET:-}"
+    echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+    idx=$((idx + 1))
+  done
+
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  pause_enter
+}
+
+get_direct_relay_tag_by_index() {
+  local idx="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") == "direct":
+        rows.append(str(ib.get("tag", "") or ""))
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+deploy_direct_relay() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local relay_tag listen_addr listen_port network
+  local target_host target_port route_outbound
+  local tmp_file
+
+  relay_tag="$(prompt_default "请输入中转实例标签" "$(next_inbound_tag_by_prefix "relay")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "12345")"
+  network="$(prompt_relay_network)"
+  target_host="$(prompt_required "请输入后端目标地址（落地机 IP/域名）")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "443")"
+  route_outbound="$(select_route_outbound_tag)" || {
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "========== 中转配置预览 =========="
+  echo "实例标签       : ${relay_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, relay_tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+relay_obj = {
+    "type": "direct",
+    "tag": relay_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "override_address": target_host,
+    "override_port": int(target_port)
+}
+
+if network in ("tcp", "udp"):
+    relay_obj["network"] = network
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == relay_tag:
+        inbounds[i] = relay_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(relay_obj)
+
+# 替换同 tag 的 route 规则
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == relay_tag:
+        matched = True
+    elif isinstance(inbound, list) and relay_tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [relay_tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入中转配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+  
+  ok "固定目标中转部署完成"
+  echo
+  echo "------ 中转关键信息 ------"
+  echo "实例标签    : ${relay_tag}"
+  echo "监听        : ${listen_addr}:${listen_port}"
+  echo "网络        : ${network:-tcp+udp}"
+  echo "目标        : ${target_host}:${target_port}"
+  echo "出口        : ${route_outbound}"
+  echo "--------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+delete_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag tmp_file meta_file
+  idx="$(prompt_required "请输入要删除的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo "准备删除中转实例：${tag}"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.delete-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+cfg_path, tag = sys.argv[1], sys.argv[2]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+
+cfg["inbounds"] = [
+    ib for ib in cfg.get("inbounds", [])
+    if not (ib.get("type") == "direct" and str(ib.get("tag", "") or "") == tag)
+]
+
+route = cfg.setdefault("route", {})
+new_rules = []
+for r in route.get("rules", []):
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+    if not matched:
+        new_rules.append(r)
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+
+  ok "已删除中转实例：${tag}"
+  pause_enter
+}
+
+get_direct_relay_detail_by_tag() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+route_rules = cfg.get("route", {}).get("rules", [])
+route_outbound = ""
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if matched:
+        route_outbound = str(r.get("outbound", "") or "")
+        break
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    print(str(ib.get("listen", "") or "::"))
+    print(str(ib.get("listen_port", "") or "12345"))
+    print(str(ib.get("network", "") or "tcp+udp"))
+    print(str(ib.get("override_address", "") or ""))
+    print(str(ib.get("override_port", "") or "443"))
+    print(route_outbound)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+prompt_relay_network_default() {
+  local default_net="$1"
+  local choice default_choice
+
+  case "${default_net}" in
+    tcp) default_choice="1" ;;
+    udp) default_choice="2" ;;
+    both|tcp+udp|"") default_choice="3" ;;
+    *) default_choice="1" ;;
+  esac
+
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+edit_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag
+  local cur_listen cur_port cur_network cur_target_host cur_target_port cur_outbound
+  local listen_addr listen_port network target_host target_port route_outbound
+  local tmp_file
+
+  idx="$(prompt_required "请输入要修改的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  mapfile -t _relay_detail < <(get_direct_relay_detail_by_tag "${tag}") || {
+    err "读取中转实例详情失败"
+    pause_enter
+    return 1
+  }
+
+  cur_listen="${_relay_detail[0]:-::}"
+  cur_port="${_relay_detail[1]:-12345}"
+  cur_network="${_relay_detail[2]:-tcp+udp}"
+  cur_target_host="${_relay_detail[3]:-}"
+  cur_target_port="${_relay_detail[4]:-443}"
+  cur_outbound="${_relay_detail[5]:-direct}"
+
+  echo "当前实例标签：${tag}"
+  echo
+
+  listen_addr="$(prompt_default "请输入监听地址" "${cur_listen}")"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "${cur_port}")"
+  network="$(prompt_relay_network_default "${cur_network}")"
+  target_host="$(prompt_default "请输入后端目标地址（落地机 IP/域名）" "${cur_target_host}")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "${cur_target_port}")"
+
+  echo
+  echo "当前出口标签：${cur_outbound}"
+  if confirm_default_no "是否重新选择出口标签？"; then
+    route_outbound="$(select_route_outbound_tag)" || {
+      pause_enter
+      return 1
+    }
+  else
+    route_outbound="${cur_outbound}"
+  fi
+
+  echo
+  echo "========== 修改预览 =========="
+  echo "实例标签       : ${tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.edit-direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+outbounds = cfg.setdefault("outbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+# 如果要走 direct，但当前配置里没有 direct outbound，就自动补一个
+has_direct = False
+for ob in outbounds:
+    if str(ob.get("tag", "") or "") == "direct" or str(ob.get("type", "") or "") == "direct":
+        has_direct = True
+        break
+
+if route_outbound == "direct" and not has_direct:
+    outbounds.insert(0, {
+        "type": "direct",
+        "tag": "direct"
+    })
+
+updated = False
+for ib in inbounds:
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    ib["listen"] = listen_addr
+    ib["listen_port"] = int(listen_port)
+    ib["override_address"] = target_host
+    ib["override_port"] = int(target_port)
+
+    if network in ("tcp", "udp"):
+        ib["network"] = network
+    else:
+        ib.pop("network", None)
+
+    updated = True
+    break
+
+if not updated:
+    raise SystemExit(1)
+
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "修改中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+    
+  ok "已修改中转实例：${tag}"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_singbox_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "         Sing-box 固定目标中转"
+    echo "======================================"
+    echo "1. 新建固定目标中转"
+    echo "2. 查看当前中转实例"
+    echo "3. 修改指定中转实例"
+    echo "4. 删除指定中转实例"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) deploy_direct_relay ;;
+      2) show_current_relays ;;
+      3) edit_direct_relay_instance ;;
+      4) delete_direct_relay_instance ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              中转管理"
+    echo "======================================"
+    echo "1. Sing-box 固定目标中转"
+    echo "2. Realm 中转"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-2]: " choice
+    case "${choice:-}" in
+      1) menu_singbox_relay_management ;;
+      2) menu_realm_relay_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+\t'"$(printf '%s\n' "${matches}" | head -n1)"
+    return 0
+  done
+
+  return 1
+}
+
+check_port_available() {
+  local port="$1"
+  local network="$2"
+  local exclude_tag="${3:-}"
+  local conflict
+
+  conflict="$(config_port_conflict "${port}" "${network}" "${exclude_tag}" 2>/dev/null || true)"
+  if [ -n "${conflict}" ]; then
+    local ctag ctype
+    IFS=
+  restart_singbox_service_safe
+}
+
+save_reality_meta() {
+  local reality_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local user_uuid="$5"
+  local flow="$6"
+  local server_name="$7"
+  local handshake_server="$8"
+  local handshake_port="$9"
+  local public_key="${10}"
+  local private_key="${11}"
+  local short_id="${12}"
+  local tcp_fast_open="${13}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${reality_tag}")"
+
+  python3 - "${meta_file}"     "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${user_uuid}" "${flow}" "${server_name}" "${handshake_server}"     "${handshake_port}" "${public_key}" "${private_key}" "${short_id}"     "${tcp_fast_open}" "${DEFAULT_CLIENT_FP}" <<'PY'
+import json, sys
+(
+    path, tag, host, port, user_name, uuid, flow, server_name,
+    handshake_server, handshake_port, public_key, private_key,
+    short_id, tcp_fast_open, fingerprint
+) = sys.argv[1:]
+data = {
+    "protocol": "vless-reality",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "flow": flow,
+    "server_name": server_name,
+    "handshake_server": handshake_server,
+    "handshake_port": int(handshake_port),
+    "public_key": public_key,
+    "private_key": private_key,
+    "short_id": short_id,
+    "tcp_fast_open": tcp_fast_open,
+    "type": "tcp",
+    "security": "reality",
+    "fingerprint": fingerprint,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vless_reality() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local reality_tag
+  local listen_addr listen_port user_name user_uuid
+  local server_name handshake_server handshake_port
+  local short_id keys private_key public_key
+  local connect_host tcp_fast_open tmp_file
+  local default_host flow
+
+  default_host="$(detect_default_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP"
+
+  reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_listen_port)"
+  user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
+  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
+  server_name="$(prompt_default "请输入伪装域名 server_name" "download.visualstudio.microsoft.com")"
+  handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手目标端口" "443")"
+  short_id="$(prompt_default "请输入 short_id" "$(gen_short_id)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  flow="xtls-rprx-vision"
+
+  if confirm_default_no "开启 TCP Fast Open 吗？"; then
+    tcp_fast_open="true"
+  else
+    tcp_fast_open="false"
+  fi
+
+  keys="$(gen_reality_keypair)" || {
+    pause_enter
+    return 1
+  }
+
+  private_key="${keys%%|*}"
+  public_key="${keys##*|}"
+
+  echo
+  echo "========== 配置预览 =========="
+  echo "实例标签       : ${reality_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${user_uuid}"
+  echo "server_name    : ${server_name}"
+  echo "握手目标       : ${handshake_server}:${handshake_port}"
+  echo "short_id       : ${short_id}"
+  echo "连接地址       : ${connect_host}"
+  echo "TCP Fast Open  : ${tcp_fast_open}"
+  echo "=============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${reality_tag}" "${listen_addr}" "${listen_port}" "${tcp_fast_open}" \
+    "${user_name}" "${user_uuid}" "${flow}" \
+    "${server_name}" "${handshake_server}" "${handshake_port}" \
+    "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+    path_cfg, reality_tag, listen_addr, listen_port, tcp_fast_open,
+    user_name, user_uuid, flow,
+    server_name, handshake_server, handshake_port,
+    private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+reality_obj = {
+    "type": "vless",
+    "tag": reality_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "tcp_fast_open": (tcp_fast_open == "true"),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": user_uuid,
+            "flow": flow
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "server_name": server_name,
+        "reality": {
+            "enabled": True,
+            "handshake": {
+                "server": handshake_server,
+                "server_port": int(handshake_port)
+            },
+            "private_key": private_key,
+            "short_id": [short_id]
+        }
+    }
+}
+
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == reality_tag:
+        inbounds[i] = reality_obj
+        break
+else:
+    inbounds.append(reality_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Reality 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${reality_tag}" "reality" "${listen_addr}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
+
+  ok "VLESS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${reality_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "流控        : ${flow}"
+  echo "传输        : tcp"
+  echo "TLS         : reality"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${reality_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS Reality URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_vless_reality() {
+  deploy_vless_reality
+}
+
+gen_password() {
+  if has_cmd openssl; then
+    openssl rand -hex 12
+    return 0
+  fi
+
+  if has_cmd python3; then
+    python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(18))
+PY
+    return 0
+  fi
+
+  echo "pass-$(date +%s)"
+}
+
+gen_self_signed_cert() {
+  local server_name="$1"
+  local cert_dir="${BASE_DIR}/certs"
+  local cert_path="${cert_dir}/hy2-selfsigned.crt"
+  local key_path="${cert_dir}/hy2-selfsigned.key"
+  local san tmp_conf
+
+  if ! has_cmd openssl; then
+    err "未找到 openssl，无法自动生成自签证书"
+    return 1
+  fi
+
+  mkdir -p "${cert_dir}" "${TMP_DIR}"
+
+  if is_valid_ip "${server_name}"; then
+    san="IP:${server_name}"
+  else
+    san="DNS:${server_name}"
+  fi
+
+  tmp_conf="${TMP_DIR}/openssl-hy2-selfsigned.cnf"
+
+  cat > "${tmp_conf}" <<EOF
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+CN = ${server_name}
+
+[v3_req]
+subjectAltName = ${san}
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+  if ! openssl req -x509 -nodes -newkey rsa:2048 \
+    -days 3650 \
+    -keyout "${key_path}" \
+    -out "${cert_path}" \
+    -config "${tmp_conf}" \
+    -extensions v3_req >/dev/null 2>&1; then
+    err "生成自签证书失败"
+    return 1
+  fi
+
+  chmod 600 "${key_path}" 2>/dev/null || true
+  chmod 644 "${cert_path}" 2>/dev/null || true
+
+  printf '%s|%s\n' "${cert_path}" "${key_path}"
+}
+
+prompt_port_default() {
+  local prompt="$1"
+  local default_port="$2"
+  local port
+
+  while true; do
+    port="$(prompt_default "${prompt}" "${default_port}")"
+    case "$port" in
+      ''|*[!0-9]*)
+        echo "输入无效：端口必须是 1-65535 的数字"
+        ;;
+      *)
+        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+          printf '%s\n' "$port"
+          return 0
+        fi
+        echo "输入无效：端口必须是 1-65535"
+        ;;
+    esac
+  done
+}
+
+ensure_inbound_meta_dir() {
+  mkdir -p "${INBOUND_META_DIR}"
+  chmod 700 "${INBOUND_META_DIR}" 2>/dev/null || true
+}
+
+inbound_meta_name_by_tag() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe='._-'))
+PY
+}
+
+inbound_meta_file_by_tag() {
+  local tag="$1"
+  local name
+  name="$(inbound_meta_name_by_tag "${tag}")"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${name}"
+}
+
+next_inbound_tag_by_prefix() {
+  local prefix="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${prefix}" <<'PY'
+import json, os, re, sys
+
+cfg_path, prefix = sys.argv[1], sys.argv[2]
+nums = []
+
+if os.path.exists(cfg_path):
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+    for ib in cfg.get("inbounds", []):
+        tag = str(ib.get("tag", ""))
+        m = re.fullmatch(re.escape(prefix) + r"-(\d{3})", tag)
+        if m:
+            nums.append(int(m.group(1)))
+
+n = 1
+while n in nums:
+    n += 1
+
+print(f"{prefix}-{n:03d}")
+PY
+}
+
+managed_inbound_rows() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+
+def label_for(ib):
+    typ = str(ib.get("type", "") or "")
+    tls = ib.get("tls", {}) or {}
+    if typ == "vless":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        if reality:
+            return "VLESS Reality"
+        if tls.get("enabled"):
+            return "VLESS TLS"
+        return "VLESS"
+    if typ == "hysteria2":
+        return "Hysteria2"
+    if typ == "vmess":
+        return "VMess TLS" if tls.get("enabled") else "VMess"
+    if typ == "tuic":
+        return "TUIC"
+    if typ == "anytls":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        return "AnyTLS Reality" if reality else "AnyTLS"
+    return typ or "<未知>"
+
+n = 0
+for ib in cfg.get("inbounds", []):
+    typ = str(ib.get("type", "") or "")
+    tag = str(ib.get("tag", "") or "")
+    if typ not in supported or not tag:
+        continue
+
+    n += 1
+    listen = str(ib.get("listen", "") or "")
+    port = str(ib.get("listen_port", "") or "")
+    if ":" in listen and not listen.startswith("["):
+        endpoint = f"[{listen}]:{port}" if port else f"[{listen}]"
+    else:
+        endpoint = f"{listen}:{port}" if port else (listen or "<空>")
+
+    users = ib.get("users", [])
+    user_count = len(users) if isinstance(users, list) else 0
+    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{user_count}")
+PY
+}
+
+managed_inbound_count() {
+  managed_inbound_rows | wc -l | tr -d ' '
+}
+
+show_managed_inbound_list() {
+  local service_state="inactive"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  echo "当前入站实例："
+  echo "编号 标签                     类型              监听地址                 用户"
+  echo "--------------------------------------------------------------------------------"
+
+  local found=0
+  while IFS=$'\t' read -r n tag _type label endpoint users; do
+    [ -z "${n}" ] && continue
+    found=1
+    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${users}"
+  done < <(managed_inbound_rows)
+
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无 SBM 管理的入站实例>"
+  fi
+
+  echo "--------------------------------------------------------------------------------"
+  echo "sing-box 服务：${service_state:-unknown}"
+}
+
+show_current_inbounds() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  pause_enter
+}
+
+get_managed_inbound_field_by_index() {
+  local idx="$1"
+  local field="$2"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" "${field}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+idx = int(sys.argv[2])
+field = sys.argv[3]
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+rows = [
+    ib for ib in cfg.get("inbounds", [])
+    if str(ib.get("type", "") or "") in supported and str(ib.get("tag", "") or "")
+]
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+ib = rows[idx - 1]
+if field == "tag":
+    print(str(ib.get("tag", "") or ""))
+elif field == "type":
+    print(str(ib.get("type", "") or ""))
+else:
+    raise SystemExit(1)
+PY
+}
+
+get_inbound_tag_by_index() {
+  get_managed_inbound_field_by_index "$1" "tag"
+}
+
+show_inbound_instance_detail() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tag = sys.argv[2]
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit(1)
+
+typ = str(ib.get("type", "") or "")
+listen = str(ib.get("listen", "") or "")
+port = str(ib.get("listen_port", "") or "")
+endpoint = f"[{listen}]:{port}" if ":" in listen and not listen.startswith("[") else f"{listen}:{port}"
+
+tls = ib.get("tls", {}) or {}
+reality = (tls.get("reality", {}) or {}).get("enabled") is True
+if typ == "vless":
+    label = "VLESS Reality" if reality else ("VLESS TLS" if tls.get("enabled") else "VLESS")
+elif typ == "hysteria2":
+    label = "Hysteria2"
+elif typ == "vmess":
+    label = "VMess TLS" if tls.get("enabled") else "VMess"
+elif typ == "tuic":
+    label = "TUIC"
+elif typ == "anytls":
+    label = "AnyTLS Reality" if reality else "AnyTLS"
+else:
+    label = typ
+
+users = ib.get("users", [])
+user_count = len(users) if isinstance(users, list) else 0
+server_name = str(tls.get("server_name", "") or "")
+network = str(ib.get("network", "") or "")
+transport = ib.get("transport", {}) or {}
+transport_type = str(transport.get("type", "") or "")
+
+print(f"实例标签 : {tag}")
+print(f"协议类型 : {label}")
+print(f"监听地址 : {endpoint}")
+print(f"用户数量 : {user_count}")
+if network:
+    print(f"网络类型 : {network}")
+if transport_type:
+    print(f"传输方式 : {transport_type}")
+if server_name:
+    print(f"SNI      : {server_name}")
+PY
+
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  if [ -f "${meta_file}" ]; then
+    echo "客户端信息: 已保存"
+  else
+    echo "客户端信息: 缺少元数据"
+  fi
+
+  local service_state="unknown"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+  echo "服务状态 : ${service_state}"
+}
+
+delete_legacy_inbound_meta_by_tag() {
+  local tag="$1"
+
+  case "${tag}" in
+    vless-reality-in|reality-*|reality*)
+      rm -f "${BASE_DIR}/reality-meta.json"
+      ;;
+    hy2-in|hy2-*|hy2*)
+      rm -f "${BASE_DIR}/hy2-meta.json"
+      ;;
+    vmess-in|vmess-*|vmess*)
+      rm -f "${BASE_DIR}/vmess-meta.json"
+      rm -rf "${BASE_DIR}/vmess-meta"
+      ;;
+    tuic-in|tuic-*|tuic*)
+      rm -f "${BASE_DIR}/tuic-meta.json"
+      ;;
+    trojan-in|trojan-*|trojan*)
+      rm -f "${BASE_DIR}/trojan-meta.json"
+      ;;
+  esac
+}
+
+delete_inbound_instance_by_tag() {
+  local tag="$1"
+  need_root
+  require_config_file || return 1
+  ensure_inbound_meta_dir
+
+  echo "准备删除入站实例：${tag}"
+  show_inbound_instance_detail "${tag}" || {
+    err "未找到入站实例：${tag}"
+    pause_enter
+    return 1
+  }
+  echo
+
+  if ! confirm_default_no "确认删除该实例吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  local tmp_file meta_file
+  tmp_file="${TMP_DIR}/config.delete-inbound.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+path_cfg, tag = sys.argv[1:]
+cfg = json.load(open(path_cfg, "r", encoding="utf-8"))
+inbounds = cfg.get("inbounds", [])
+
+before = len(inbounds)
+inbounds = [ib for ib in inbounds if str(ib.get("tag", "") or "") != tag]
+if len(inbounds) == before:
+    raise SystemExit(1)
+
+cfg["inbounds"] = inbounds
+with open(path_cfg, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除入站实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败；如存在上一份配置，已尝试自动回滚"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+  delete_legacy_inbound_meta_by_tag "${tag}"
+
+  ok "已删除入站实例：${tag}"
+  pause_enter
+}
+
+delete_inbound_instance() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  echo
+
+  local idx tag
+  idx="$(prompt_required "请输入要删除的入站编号")"
+  tag="$(get_managed_inbound_field_by_index "${idx}" "tag" 2>/dev/null || true)"
+  if [ -z "${tag}" ]; then
+    err "入站编号无效"
+    pause_enter
+    return 1
+  fi
+
+  delete_inbound_instance_by_tag "${tag}"
+}
+
+menu_inbound_instance_detail() {
+  local tag="$1"
+  local typ="$2"
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_inbound_instance_detail "${tag}" || {
+      err "实例已不存在：${tag}"
+      pause_enter
+      return
+    }
+    echo "--------------------------------------"
+    echo "1. 查看详情"
+    echo "2. 导出客户端配置"
+    if [ "${typ}" = "vless" ]; then
+      echo "3. 用户管理"
+    else
+      echo "3. 用户管理（仅 VLESS）"
+    fi
+    echo "4. 删除实例"
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1)
+        clear
+        echo "======================================"
+        echo "              实例详情"
+        echo "======================================"
+        show_inbound_instance_detail "${tag}"
+        pause_enter
+        ;;
+      2)
+        export_inbound_instance_by_tag "${tag}" "${typ}"
+        ;;
+      3)
+        if [ "${typ}" = "vless" ]; then
+          menu_vless_user_management_for_tag "${tag}"
+        else
+          warn "当前协议暂不支持独立用户管理"
+          pause_enter
+        fi
+        ;;
+      4)
+        delete_inbound_instance_by_tag "${tag}"
+        return
+        ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_inbound_instance_management() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_managed_inbound_list
+    echo
+    echo "a. 导出全部 URI"
+    echo "0. 返回"
+    echo
+
+    local choice tag typ
+    read -r -p "请选择实例编号 / a / 0: " choice
+    case "${choice:-}" in
+      0) return ;;
+      a|A)
+        export_all_uris
+        ;;
+      ''|*[!0-9]*)
+        echo "无效选项"
+        sleep 1
+        ;;
+      *)
+        tag="$(get_managed_inbound_field_by_index "${choice}" "tag" 2>/dev/null || true)"
+        typ="$(get_managed_inbound_field_by_index "${choice}" "type" 2>/dev/null || true)"
+        if [ -z "${tag}" ] || [ -z "${typ}" ]; then
+          err "实例编号无效"
+          sleep 1
+          continue
+        fi
+        menu_inbound_instance_detail "${tag}" "${typ}"
+        ;;
+    esac
+  done
+}
+
+
+save_hy2_meta() {
+  local hy2_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local password="$5"
+  local server_name="$6"
+  local obfs_password="$7"
+  local up_mbps="$8"
+  local down_mbps="$9"
+  local cert_mode="${10}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${hy2_tag}")"
+
+  python3 - "${meta_file}"     "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${password}" "${server_name}" "${obfs_password}" "${up_mbps}"     "${down_mbps}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, password, server_name, obfs_password, up_mbps, down_mbps, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "hysteria2",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "password": password,
+    "server_name": server_name,
+    "cert_mode": cert_mode,
+    "obfs_password": obfs_password,
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_hysteria2() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local hy2_tag
+  local listen_addr listen_port user_name password
+  local cert_path key_path connect_host server_name
+  local up_mbps down_mbps obfs_password use_obfs
+  local cert_mode default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  hy2_tag="$(prompt_default "请输入 Hysteria2 实例标签" "$(next_inbound_tag_by_prefix "hy2")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入 Hysteria2 监听端口" "8443")"
+  user_name="$(prompt_default "请输入 Hysteria2 用户备注" "${hy2_tag}")"
+  password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  up_mbps="$(prompt_default "请输入上行带宽 up_mbps" "100")"
+  down_mbps="$(prompt_default "请输入下行带宽 down_mbps" "100")"
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  if confirm_default_no "启用 salamander obfs 吗？"; then
+    use_obfs="true"
+    obfs_password="$(prompt_default "请输入 obfs 密码" "$(gen_password)")"
+  else
+    use_obfs="false"
+    obfs_password=""
+  fi
+
+  echo
+  echo "========== Hysteria2 配置预览 =========="
+  echo "实例标签       : ${hy2_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "客户端 SNI     : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "up_mbps        : ${up_mbps}"
+  echo "down_mbps      : ${down_mbps}"
+  echo "obfs           : ${use_obfs}"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs_password  : ${obfs_password}"
+  fi
+  echo "========================================"
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.hy2.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${hy2_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${password}" \
+    "${cert_path}" "${key_path}" "${up_mbps}" "${down_mbps}" \
+    "${use_obfs}" "${obfs_password}" <<'PY'
+import json, sys
+
+(
+    path_cfg, hy2_tag, listen_addr, listen_port, user_name, password,
+    cert_path, key_path, up_mbps, down_mbps,
+    use_obfs, obfs_password
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+hy2_obj = {
+    "type": "hysteria2",
+    "tag": hy2_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+    "users": [
+        {
+            "name": user_name,
+            "password": password
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+if use_obfs == "true":
+    hy2_obj["obfs"] = {
+        "type": "salamander",
+        "password": obfs_password
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == hy2_tag:
+        inbounds[i] = hy2_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(hy2_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Hysteria2 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_hy2_meta "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
+
+  ok "Hysteria2 部署完成"
+  echo
+  echo "------ Hysteria2 客户端关键参数 ------"
+  echo "实例标签    : ${hy2_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "用户名备注  : ${user_name}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "协议        : hysteria2"
+  echo "传输        : UDP / QUIC"
+  echo "up/down     : ${up_mbps}/${down_mbps} Mbps"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs        : salamander"
+    echo "obfs密码    : ${obfs_password}"
+  fi
+  echo "--------------------------------------"
+  echo
+
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式    : 自签证书"
+    echo "客户端建议  :"
+    echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
+    echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
+    echo "自签证书路径: ${cert_path}"
+  else
+    echo "证书模式    : 正式证书"
+    echo "客户端建议  : 正常校验证书即可"
+  fi
+  echo
+  echo "注意：如果你用官方 Hysteria2 客户端，常见的 userpass 实际要填成 <用户名>:<密码> 的组合。"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local hy2_meta hy2_uri
+  hy2_meta="$(inbound_meta_file_by_tag "${hy2_tag}")"
+  hy2_uri="$(build_hy2_uri "${hy2_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "Hysteria2 URI" "${hy2_uri}"
+
+  pause_enter
+}
+
+menu_deploy_hysteria2() {
+  deploy_hysteria2
+}
+
+gen_uuid_value() {
+  if has_cmd sing-box; then
+    sing-box generate uuid 2>/dev/null && return 0
+  fi
+
+  if has_cmd uuidgen; then
+    uuidgen | tr 'A-Z' 'a-z'
+    return 0
+  fi
+
+  python3 - <<'PY'
+import uuid
+print(str(uuid.uuid4()))
+PY
+}
+
+gen_random_path() {
+  if has_cmd openssl; then
+    echo "/$(openssl rand -hex 4)"
+    return 0
+  fi
+
+  python3 - <<'PY'
+import secrets
+print("/" + secrets.token_hex(4))
+PY
+}
+
+save_vmess_meta() {
+  local vmess_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local transport_type="$6"
+  local tls_enabled="$7"
+  local server_name="$8"
+  local path="$9"
+  local host="${10}"
+  local method="${11}"
+  local cert_mode="${12}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${vmess_tag}")"
+
+  python3 - "${meta_file}"     "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}"     "${path}" "${host}" "${method}" "${cert_mode}" <<'PY'
+import json, sys
+path_out, tag, connect_host, port, user_name, uuid, transport_type, tls_enabled, server_name, ws_path, host, method, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "vmess",
+    "tag": tag,
+    "connect_host": connect_host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "transport_type": transport_type,
+    "tls_enabled": tls_enabled,
+    "server_name": server_name,
+    "path": ws_path,
+    "host": host,
+    "method": method,
+    "cert_mode": cert_mode,
+}
+with open(path_out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vmess() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+
+  local transport_choice transport_type tls_choice tls_enabled cert_mode
+  local listen_addr listen_port user_name uuid vmess_tag
+  local connect_host server_name cert_path key_path
+  local path host method default_host tmp_file backend cert_pair default_tag_prefix
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  echo
+  echo "请选择 VMess 传输方式："
+  echo "1. HTTP"
+  echo "2. WebSocket"
+  read -r -p "请选择 [1-2]（默认 2）: " transport_choice
+  transport_choice="${transport_choice:-2}"
+
+  case "${transport_choice}" in
+    1)
+      transport_type="http"
+      default_tag_prefix="vmess-http"
+      ;;
+    2)
+      transport_type="ws"
+      default_tag_prefix="vmess-ws"
+      ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  vmess_tag="$(prompt_default "请输入 VMess 实例标签" "$(next_inbound_tag_by_prefix "${default_tag_prefix}")")"
+
+  echo
+  echo "是否启用 TLS："
+  echo "1. 开启"
+  echo "2. 关闭"
+  read -r -p "请选择 [1-2]（默认 2）: " tls_choice
+  tls_choice="${tls_choice:-2}"
+
+  case "${tls_choice}" in
+    1) tls_enabled="true" ;;
+    2) tls_enabled="false" ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  listen_addr="$(prompt_listen_addr)"
+  if [ "${tls_enabled}" = "true" ]; then
+    listen_port="$(prompt_port_default "请输入 VMess 监听端口" "443")"
+  else
+    if [ "${transport_type}" = "http" ]; then
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "8080")"
+    else
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "80")"
+    fi
+  fi
+
+  user_name="$(prompt_default "请输入 VMess 用户备注" "${vmess_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+
+  if [ "${transport_type}" = "http" ]; then
+    path="$(prompt_default "请输入 HTTP path" "/")"
+    host="$(prompt_default "请输入 HTTP host（留空为不设置）" "")"
+    method="$(prompt_default "请输入 HTTP method" "GET")"
+  else
+    path="$(prompt_default "请输入 WebSocket path" "$(gen_random_path)")"
+    host="$(prompt_default "请输入 WS Host 头（留空为不设置）" "")"
+    method=""
+  fi
+
+  server_name=""
+  cert_path=""
+  key_path=""
+  cert_mode="0"
+
+  if [ "${tls_enabled}" = "true" ]; then
+    server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+    echo
+    echo "证书模式："
+    echo "1. 正式证书"
+    echo "2. 自签证书"
+    read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+    cert_mode="${cert_mode:-1}"
+
+    if [ "${cert_mode}" = "2" ]; then
+      cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+        pause_enter
+        return 1
+      }
+      cert_path="${cert_pair%%|*}"
+      key_path="${cert_pair##*|}"
+
+      echo
+      echo "已自动生成自签证书："
+      echo "certificate_path : ${cert_path}"
+      echo "key_path         : ${key_path}"
+      echo
+    else
+      cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+      key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+    fi
+
+    if [ ! -f "${cert_path}" ]; then
+      err "证书文件不存在：${cert_path}"
+      pause_enter
+      return 1
+    fi
+
+    if [ ! -f "${key_path}" ]; then
+      err "私钥文件不存在：${key_path}"
+      pause_enter
+      return 1
+    fi
+  fi
+
+  echo
+  echo "========== VMess 配置预览 =========="
+  echo "实例标签       : ${vmess_tag}"
+  echo "传输方式       : ${transport_type}"
+  echo "TLS            : ${tls_enabled}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "alterId        : 0"
+  echo "path           : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host      : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method         : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "server_name    : ${server_name}"
+    if [ "${cert_mode}" = "2" ]; then
+      echo "证书模式       : 自签证书"
+    else
+      echo "证书模式       : 正式证书"
+    fi
+    echo "证书路径       : ${cert_path}"
+    echo "私钥路径       : ${key_path}"
+  fi
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.vmess.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${vmess_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
+    "${transport_type}" "${path}" "${host}" "${method}" \
+    "${tls_enabled}" "${server_name}" "${cert_path}" "${key_path}" <<'PY'
+import json, sys
+
+(
+    path_cfg, vmess_tag, listen_addr, listen_port, user_name, uuid,
+    transport_type, req_path, host, method,
+    tls_enabled, server_name, cert_path, key_path
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+vmess_obj = {
+    "type": "vmess",
+    "tag": vmess_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "alterId": 0
+        }
+    ]
+}
+
+if transport_type == "http":
+    transport = {
+        "type": "http",
+        "path": req_path,
+        "method": method or "GET"
+    }
+    if host:
+        transport["host"] = [host]
+elif transport_type == "ws":
+    transport = {
+        "type": "ws",
+        "path": req_path
+    }
+    if host:
+        transport["headers"] = {"Host": host}
+else:
+    raise SystemExit("unknown transport type")
+
+vmess_obj["transport"] = transport
+
+if tls_enabled == "true":
+    vmess_obj["tls"] = {
+        "enabled": True,
+        "server_name": server_name,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == vmess_tag:
+        inbounds[i] = vmess_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(vmess_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VMess 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vmess_meta "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
+
+  ok "VMess 部署完成"
+  echo
+  echo "------ VMess 客户端关键参数 ------"
+  echo "实例标签    : ${vmess_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "alterId     : 0"
+  echo "传输        : ${transport_type}"
+  echo "path        : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host   : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method      : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "TLS         : enabled"
+    echo "SNI         : ${server_name}"
+  else
+    echo "TLS         : disabled"
+  fi
+  echo "----------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local vmess_meta vmess_uri
+  vmess_meta="$(inbound_meta_file_by_tag "${vmess_tag}")"
+  vmess_uri="$(build_vmess_uri "${vmess_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "VMess URI" "${vmess_uri}"
+
+  pause_enter
+}
+
+menu_deploy_vmess() {
+  deploy_vmess
+}
+
+save_tuic_meta() {
+  local tuic_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local password="$6"
+  local server_name="$7"
+  local congestion_control="$8"
+  local zero_rtt_handshake="$9"
+  local heartbeat="${10}"
+  local cert_mode="${11}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tuic_tag}")"
+
+  python3 - "${meta_file}"     "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${password}" "${server_name}" "${congestion_control}"     "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, uuid, password, server_name, congestion, zero_rtt, heartbeat, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "tuic",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "password": password,
+    "server_name": server_name,
+    "congestion_control": congestion,
+    "zero_rtt_handshake": zero_rtt,
+    "heartbeat": heartbeat,
+    "cert_mode": cert_mode,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_tuic() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local tuic_tag
+  local listen_addr listen_port user_name uuid password
+  local connect_host server_name cert_path key_path cert_mode
+  local congestion_control zero_rtt_choice zero_rtt_handshake
+  local heartbeat default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  tuic_tag="$(prompt_default "请输入 TUIC 实例标签" "$(next_inbound_tag_by_prefix "tuic")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入 TUIC 监听端口" "443")"
+  user_name="$(prompt_default "请输入 TUIC 用户备注" "${tuic_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  echo "请选择 congestion_control："
+  echo "1. cubic"
+  echo "2. new_reno"
+  echo "3. bbr"
+  read -r -p "请选择 [1-3]（默认 1）: " congestion_control
+  case "${congestion_control:-1}" in
+    1) congestion_control="cubic" ;;
+    2) congestion_control="new_reno" ;;
+    3) congestion_control="bbr" ;;
+    *) congestion_control="cubic" ;;
+  esac
+
+  echo
+  echo "是否开启 zero_rtt_handshake："
+  echo "1. 关闭（推荐）"
+  echo "2. 开启"
+  read -r -p "请选择 [1-2]（默认 1）: " zero_rtt_choice
+  case "${zero_rtt_choice:-1}" in
+    1) zero_rtt_handshake="false" ;;
+    2) zero_rtt_handshake="true" ;;
+    *) zero_rtt_handshake="false" ;;
+  esac
+
+  heartbeat="$(prompt_default "请输入 heartbeat（默认 10s）" "10s")"
+
+  echo
+  echo "========== TUIC 配置预览 =========="
+  echo "实例标签       : ${tuic_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "SNI            : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "congestion     : ${congestion_control}"
+  echo "zero_rtt       : ${zero_rtt_handshake}"
+  echo "heartbeat      : ${heartbeat}"
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.tuic.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tuic_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
+    "${cert_path}" "${key_path}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" <<'PY'
+import json, sys
+
+(
+    path_cfg, tuic_tag, listen_addr, listen_port, user_name, uuid, password,
+    cert_path, key_path, congestion_control, zero_rtt_handshake, heartbeat
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+tuic_obj = {
+    "type": "tuic",
+    "tag": tuic_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "password": password
+        }
+    ],
+    "congestion_control": congestion_control,
+    "zero_rtt_handshake": (zero_rtt_handshake == "true"),
+    "heartbeat": heartbeat,
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == tuic_tag:
+        inbounds[i] = tuic_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(tuic_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 TUIC 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_tuic_meta "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
+
+  ok "TUIC 部署完成"
+  echo
+  echo "------ TUIC 客户端关键参数 ------"
+  echo "实例标签    : ${tuic_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "congestion  : ${congestion_control}"
+  echo "zero_rtt    : ${zero_rtt_handshake}"
+  echo "heartbeat   : ${heartbeat}"
+  echo "--------------------------------"
+  echo
+
+  if [ "${zero_rtt_handshake}" = "true" ]; then
+    echo "警告：zero_rtt_handshake 已开启，存在重放攻击风险，不推荐长期使用。"
+    echo
+  fi
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local tuic_meta tuic_uri
+  tuic_meta="$(inbound_meta_file_by_tag "${tuic_tag}")"
+  tuic_uri="$(build_tuic_uri "${tuic_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "TUIC URI" "${tuic_uri}"
+
+  pause_enter
+}
+
+menu_deploy_tuic() {
+  deploy_tuic
+}
+
+# ---------------------------
+# AnyTLS helpers
+# ---------------------------
+
+detect_default_connect_host() {
+  local host=""
+
+  # 优先取 IPv4
+  if has_cmd curl; then
+    host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  elif has_cmd wget; then
+    host="$(wget -4 -qO- --timeout=5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+
+  host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+
+  # 再兜底
+  if [ -z "${host}" ]; then
+    host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+  fi
+
+  [ -z "${host}" ] && host="127.0.0.1"
+  printf '%s\n' "${host}"
+}
+
+anytls_rand_port() {
+  python3 - <<'PY'
+import random
+print(random.randint(20000, 50000))
+PY
+}
+
+anytls_rand_password() {
+  python3 - <<'PY'
+import secrets, base64
+raw = secrets.token_bytes(18)
+print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+PY
+}
+
+anytls_rand_short_id() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(4))
+PY
+}
+
+anytls_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_anytls_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local password="$7"
+  local server_name="$8"
+  local cert_mode="$9"
+  local certificate_path="${10}"
+  local key_path="${11}"
+  local reality_public_key="${12}"
+  local reality_private_key="${13}"
+  local reality_short_id="${14}"
+  local handshake_server="${15}"
+  local handshake_port="${16}"
+  local utls_fingerprint="${17:-chrome}"
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" "${utls_fingerprint}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, password, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port, utls_fingerprint
+) = sys.argv[1:]
+
+data = {
+  "protocol": "anytls",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "password": password,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_enabled": mode == "reality",
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443,
+  "utls_fingerprint": utls_fingerprint
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_anytls_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+generate_anytls_reality_keypair() {
+  local out priv pub
+
+  if ! has_cmd sing-box; then
+    err "未找到 sing-box，无法生成 Reality 密钥"
+    return 1
+  fi
+
+  out="$(sing-box generate reality-keypair 2>/dev/null)" || return 1
+  priv="$(printf '%s\n' "${out}" | awk -F': ' '/Private/ {print $2; exit}')"
+  pub="$(printf '%s\n' "${out}" | awk -F': ' '/Public/  {print $2; exit}')"
+
+  if [ -z "${priv}" ] || [ -z "${pub}" ]; then
+    return 1
+  fi
+
+  printf '%s|%s\n' "${priv}" "${pub}"
+}
+
+deploy_anytls_tls() {
+  need_root
+
+  local cert_mode="$1"  # 1=正式证书 2=自签证书
+  local tag listen listen_port user_name password connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_anytls_self_signed_cert "${tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.anytls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, password, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443" "chrome"
+
+  ok "AnyTLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "证书模式    : $([ "${cert_mode}" = "1" ] && echo 正式证书 || echo 自签证书)"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "----------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+deploy_anytls_reality() {
+  need_root
+
+  local tag listen listen_port user_name password connect_host server_name
+  local handshake_server handshake_port short_id keypair private_key public_key tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI")"
+  handshake_server="$(prompt_default "请输入 Reality 握手域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手端口" "443")"
+  short_id="$(prompt_default "请输入 Reality short_id" "$(anytls_rand_short_id)")"
+
+  keypair="$(generate_anytls_reality_keypair)" || {
+    err "生成 Reality 密钥失败"
+    pause_enter
+    return 1
+  }
+  private_key="${keypair%%|*}"
+  public_key="${keypair##*|}"
+
+  tmp_file="${TMP_DIR}/config.anytls.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${handshake_server}" "${handshake_port}" "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+  cfg_path, tag, listen, listen_port, user_name, password,
+  handshake_server, handshake_port, private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "reality": {
+      "enabled": True,
+      "handshake": {
+        "server": handshake_server,
+        "server_port": int(handshake_port)
+      },
+      "private_key": private_key,
+      "short_id": [short_id]
+    }
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS + Reality 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}" "chrome"
+
+  ok "AnyTLS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "握手域名    : ${handshake_server}:${handshake_port}"
+  echo "uTLS 指纹   : chrome"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS + Reality 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "--------------------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_anytls() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             AnyTLS 入站"
+    echo "======================================"
+    echo "1. AnyTLS（正式证书）"
+    echo "2. AnyTLS（自签证书）"
+    echo "3. AnyTLS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_anytls_tls "1" ;;
+      2) deploy_anytls_tls "2" ;;
+      3) deploy_anytls_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+vless_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_vless_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local user_uuid="$7"
+  local flow="$8"
+  local server_name="$9"
+  local cert_mode="${10}"
+  local certificate_path="${11}"
+  local key_path="${12}"
+  local reality_public_key="${13}"
+  local reality_private_key="${14}"
+  local reality_short_id="${15}"
+  local handshake_server="${16}"
+  local handshake_port="${17}"
+
+  local meta_file
+  meta_file="$(vless_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, user_uuid, flow, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port
+) = sys.argv[1:]
+
+data = {
+  "protocol": "vless",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "user_uuid": user_uuid,
+  "flow": flow,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_vless_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+menu_deploy_vless() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              VLESS 入站"
+    echo "======================================"
+    echo "1. VLESS + TLS（正式证书）"
+    echo "2. VLESS + TLS（自签证书）"
+    echo "3. VLESS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_vless_tls "1" ;;
+      2) deploy_vless_tls "2" ;;
+      3) deploy_vless_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+deploy_vless_tls() {
+  need_root
+
+  local cert_mode="$1"   # 1=正式证书 2=自签证书
+  local vless_tag listen listen_port user_name user_uuid connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  vless_tag="$(prompt_default "请输入 VLESS 实例标签" "vless-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_default "请输入 VLESS 监听端口" "$(random_port)")"
+  user_name="$(prompt_default "请输入 VLESS 用户备注" "vless-user1")"
+  user_uuid="$(prompt_default "请输入 VLESS UUID" "$(gen_uuid)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_vless_self_signed_cert "${vless_tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.vless.tls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${vless_tag}" "${listen}" "${listen_port}" "${user_name}" "${user_uuid}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, user_uuid, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "vless",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "uuid": user_uuid
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    break
+else:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VLESS + TLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${vless_tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443"
+
+  ok "VLESS + TLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${vless_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "传输        : tcp"
+  echo "TLS         : tls"
+  echo "SNI         : ${server_name}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${vless_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_inbound_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              入站管理"
+    echo "======================================"
+    echo "1. 部署/重装 VLESS"
+    echo "2. 部署/重装 Hysteria2"
+    echo "3. 部署/重装 VMess"
+    echo "4. 部署/重装 TUIC"
+    echo "5. 部署/重装 AnyTLS"
+    echo "6. 中转管理"
+    echo "7. 入站实例管理"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-7]: " choice
+    case "${choice:-}" in
+      1) menu_deploy_vless ;;
+      2) menu_deploy_hysteria2 ;;
+      3) menu_deploy_vmess ;;
+      4) menu_deploy_tuic ;;
+      5) menu_deploy_anytls ;;
+      6) menu_relay_management ;;
+      7) menu_inbound_instance_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+# =========================
+# Direct Relay / 固定目标中转
+# =========================
+
+save_direct_relay_meta() {
+  local relay_tag="$1"
+  local listen_addr="$2"
+  local listen_port="$3"
+  local network="$4"
+  local target_host="$5"
+  local target_port="$6"
+  local route_outbound="$7"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${relay_tag}")"
+
+  python3 - "${meta_file}"     "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}"     "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+path, tag, listen, listen_port, network, target_host, target_port, route_outbound = sys.argv[1:]
+data = {
+    "protocol": "direct-relay",
+    "tag": tag,
+    "listen": listen,
+    "listen_port": int(listen_port),
+    "network": network,
+    "target_host": target_host,
+    "target_port": int(target_port),
+    "route_outbound": route_outbound,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+prompt_relay_network() {
+  local choice
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 1=仅 TCP）: " choice
+
+    case "${choice:-1}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+
+list_route_outbound_candidates() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+rows = []
+seen = set()
+
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag:
+        continue
+    if tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append((tag, typ or "unknown"))
+        seen.add(tag)
+
+# 没有 direct 就补一个，保证中转机至少能 direct 出去
+if not has_direct:
+    rows.insert(0, ("direct", "direct"))
+
+for i, (tag, typ) in enumerate(rows, 1):
+    print(f"{i}\t{tag}\t{typ}")
+PY
+}
+
+get_route_outbound_by_index() {
+  local idx="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+seen = set()
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag or tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append(tag)
+        seen.add(tag)
+
+if not has_direct:
+    rows.insert(0, "direct")
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+select_route_outbound_tag() {
+  require_config_file || return 1
+
+  local found=0
+  echo >&2
+  echo "可选出口：" >&2
+  echo "编号 标签                     类型" >&2
+  echo "--------------------------------------------------------" >&2
+  while IFS=$'\t' read -r idx tag typ; do
+    [ -z "${idx}" ] && continue
+    found=1
+    printf '%-4s %-24s %s\n' "${idx}" "${tag}" "${typ}" >&2
+  done < <(list_route_outbound_candidates)
+  echo "--------------------------------------------------------" >&2
+
+  if [ "${found}" -eq 0 ]; then
+    warn "未检测到现有 outbound，已自动回退到 direct" >&2
+    printf '%s\n' "direct"
+    return 0
+  fi
+
+  local idx tag
+  read -r -p "请输入出口编号 [默认: 1]: " idx
+  idx="${idx:-1}"
+
+  tag="$(get_route_outbound_by_index "${idx}")" || {
+    err "编号无效" >&2
+    return 1
+  }
+
+  printf '%s\n' "${tag}"
+}
+
+relay_fw_allowed_for_proto() {
+  local port="$1"
+  local proto="$2"
+  local backend
+
+  if ! declare -F detect_firewall_backend >/dev/null 2>&1; then
+    return 2
+  fi
+
+  backend="$(detect_firewall_backend 2>/dev/null || echo none)"
+
+  case "${backend}" in
+    ufw)
+      if ufw status 2>/dev/null | grep -Eiq "(^|[[:space:]])${port}/${proto}([[:space:]]|$).*ALLOW"; then
+        return 0
+      fi
+      return 1
+      ;;
+    firewalld)
+      if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/${proto}"; then
+        return 0
+      fi
+      return 1
+      ;;
+    iptables)
+      if iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+relay_fw_status_text() {
+  local port="$1"
+  local network="$2"
+
+  local tcp_rc udp_rc
+  tcp_rc=2
+  udp_rc=2
+
+  case "${network}" in
+    tcp)
+      relay_fw_allowed_for_proto "${port}" "tcp"
+      case "$?" in
+        0) printf '%s\n' "tcp 已放行" ;;
+        1) printf '%s\n' "tcp 未放行" ;;
+        *) printf '%s\n' "tcp 未知" ;;
+      esac
+      ;;
+    udp)
+      relay_fw_allowed_for_proto "${port}" "udp"
+      case "$?" in
+        0) printf '%s\n' "udp 已放行" ;;
+        1) printf '%s\n' "udp 未放行" ;;
+        *) printf '%s\n' "udp 未知" ;;
+      esac
+      ;;
+    ""|tcp+udp)
+      relay_fw_allowed_for_proto "${port}" "tcp"; tcp_rc="$?"
+      relay_fw_allowed_for_proto "${port}" "udp"; udp_rc="$?"
+
+      if [ "${tcp_rc}" = "0" ] && [ "${udp_rc}" = "0" ]; then
+        printf '%s\n' "tcp/udp 已放行"
+      elif [ "${tcp_rc}" = "1" ] && [ "${udp_rc}" = "1" ]; then
+        printf '%s\n' "tcp/udp 未放行"
+      elif [ "${tcp_rc}" = "2" ] || [ "${udp_rc}" = "2" ]; then
+        printf '%s\n' "tcp/udp 未知"
+      else
+        printf '%s\n' "tcp/udp 部分放行"
+      fi
+      ;;
+    *)
+      printf '%s\n' "未知"
+      ;;
+  esac
+}
+
+relay_status_color() {
+  case "${1:-}" in
+    *已放行*|active|running)
+      printf "%s" "${C_BGREEN:-}"
+      ;;
+    *部分放行*|*未放行*|inactive|degraded)
+      printf "%s" "${C_BYELLOW:-${C_YELLOW:-}}"
+      ;;
+    *未知*|unknown)
+      printf "%s" "${C_BCYAN:-}"
+      ;;
+    *)
+      printf "%s" "${C_RESET:-}"
+      ;;
+  esac
+}
+
+show_current_relays() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  local svc_status="unknown"
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  local -a relay_rows=()
+  mapfile -t relay_rows < <(
+    python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+route_rules = cfg.get("route", {}).get("rules", [])
+relay_route = {}
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    outbound = r.get("outbound", "")
+    if isinstance(inbound, str):
+        relay_route[inbound] = outbound
+    elif isinstance(inbound, list):
+        for x in inbound:
+            if isinstance(x, str):
+                relay_route[x] = outbound
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+
+    tag = str(ib.get("tag", "") or "<未设置>")
+    network = str(ib.get("network", "") or "tcp+udp")
+    listen = str(ib.get("listen", "") or "<空>")
+    listen_port = str(ib.get("listen_port", "") or "<空>")
+    target_host = str(ib.get("override_address", "") or "<空>")
+    target_port = str(ib.get("override_port", "") or "<空>")
+    outbound = str(relay_route.get(str(ib.get("tag", "") or ""), "") or "<未指定>")
+
+    print("\t".join([tag, network, listen, listen_port, target_host, target_port, outbound]))
+PY
+  )
+
+  clear
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  echo "${C_BMAGENTA:-}            中转实例状态${C_RESET:-}"
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  printf "%b%-10s%b %b%s%b\n" \
+    "${C_BCYAN:-}" "服务状态 :" "${C_RESET:-}" \
+    "$(relay_status_color "${svc_status}")" "${svc_status:-unknown}" "${C_RESET:-}"
+  printf "%b%-10s%b %s\n" \
+    "${C_BCYAN:-}" "实例数量 :" "${C_RESET:-}" "${#relay_rows[@]}"
+  echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+
+  if [ "${#relay_rows[@]}" -eq 0 ]; then
+    echo "暂无中转实例"
+    echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+    pause_enter
+    return 0
+  fi
+
+  local idx=1
+  local row tag network listen listen_port target_host target_port outbound fw_status fw_color
+  for row in "${relay_rows[@]}"; do
+    IFS=$'\t' read -r tag network listen listen_port target_host target_port outbound <<< "${row}"
+    fw_status="$(relay_fw_status_text "${listen_port}" "${network}")"
+    fw_color="$(relay_status_color "${fw_status}")"
+
+    echo
+    printf "%b[%d] %s%b\n" "${C_BCYAN:-}${C_BOLD:-}" "${idx}" "${tag}" "${C_RESET:-}"
+    printf "%b%-10s%b %s:%s (%s)\n" \
+      "${C_BCYAN:-}" "监听 :" "${C_RESET:-}" \
+      "${listen}" "${listen_port}" "${network}"
+    printf "%b%-10s%b %s:%s\n" \
+      "${C_BCYAN:-}" "目标 :" "${C_RESET:-}" \
+      "${target_host}" "${target_port}"
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "出口 :" "${C_RESET:-}" \
+      "${outbound}"
+    printf "%b%-10s%b %b%s%b\n" \
+      "${C_BCYAN:-}" "防火墙 :" "${C_RESET:-}" \
+      "${fw_color}" "${fw_status}" "${C_RESET:-}"
+    echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+    idx=$((idx + 1))
+  done
+
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  pause_enter
+}
+
+get_direct_relay_tag_by_index() {
+  local idx="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") == "direct":
+        rows.append(str(ib.get("tag", "") or ""))
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+deploy_direct_relay() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local relay_tag listen_addr listen_port network
+  local target_host target_port route_outbound
+  local tmp_file
+
+  relay_tag="$(prompt_default "请输入中转实例标签" "$(next_inbound_tag_by_prefix "relay")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "12345")"
+  network="$(prompt_relay_network)"
+  target_host="$(prompt_required "请输入后端目标地址（落地机 IP/域名）")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "443")"
+  route_outbound="$(select_route_outbound_tag)" || {
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "========== 中转配置预览 =========="
+  echo "实例标签       : ${relay_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, relay_tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+relay_obj = {
+    "type": "direct",
+    "tag": relay_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "override_address": target_host,
+    "override_port": int(target_port)
+}
+
+if network in ("tcp", "udp"):
+    relay_obj["network"] = network
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == relay_tag:
+        inbounds[i] = relay_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(relay_obj)
+
+# 替换同 tag 的 route 规则
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == relay_tag:
+        matched = True
+    elif isinstance(inbound, list) and relay_tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [relay_tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入中转配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+  
+  ok "固定目标中转部署完成"
+  echo
+  echo "------ 中转关键信息 ------"
+  echo "实例标签    : ${relay_tag}"
+  echo "监听        : ${listen_addr}:${listen_port}"
+  echo "网络        : ${network:-tcp+udp}"
+  echo "目标        : ${target_host}:${target_port}"
+  echo "出口        : ${route_outbound}"
+  echo "--------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+delete_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag tmp_file meta_file
+  idx="$(prompt_required "请输入要删除的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo "准备删除中转实例：${tag}"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.delete-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+cfg_path, tag = sys.argv[1], sys.argv[2]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+
+cfg["inbounds"] = [
+    ib for ib in cfg.get("inbounds", [])
+    if not (ib.get("type") == "direct" and str(ib.get("tag", "") or "") == tag)
+]
+
+route = cfg.setdefault("route", {})
+new_rules = []
+for r in route.get("rules", []):
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+    if not matched:
+        new_rules.append(r)
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+
+  ok "已删除中转实例：${tag}"
+  pause_enter
+}
+
+get_direct_relay_detail_by_tag() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+route_rules = cfg.get("route", {}).get("rules", [])
+route_outbound = ""
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if matched:
+        route_outbound = str(r.get("outbound", "") or "")
+        break
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    print(str(ib.get("listen", "") or "::"))
+    print(str(ib.get("listen_port", "") or "12345"))
+    print(str(ib.get("network", "") or "tcp+udp"))
+    print(str(ib.get("override_address", "") or ""))
+    print(str(ib.get("override_port", "") or "443"))
+    print(route_outbound)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+prompt_relay_network_default() {
+  local default_net="$1"
+  local choice default_choice
+
+  case "${default_net}" in
+    tcp) default_choice="1" ;;
+    udp) default_choice="2" ;;
+    both|tcp+udp|"") default_choice="3" ;;
+    *) default_choice="1" ;;
+  esac
+
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+edit_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag
+  local cur_listen cur_port cur_network cur_target_host cur_target_port cur_outbound
+  local listen_addr listen_port network target_host target_port route_outbound
+  local tmp_file
+
+  idx="$(prompt_required "请输入要修改的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  mapfile -t _relay_detail < <(get_direct_relay_detail_by_tag "${tag}") || {
+    err "读取中转实例详情失败"
+    pause_enter
+    return 1
+  }
+
+  cur_listen="${_relay_detail[0]:-::}"
+  cur_port="${_relay_detail[1]:-12345}"
+  cur_network="${_relay_detail[2]:-tcp+udp}"
+  cur_target_host="${_relay_detail[3]:-}"
+  cur_target_port="${_relay_detail[4]:-443}"
+  cur_outbound="${_relay_detail[5]:-direct}"
+
+  echo "当前实例标签：${tag}"
+  echo
+
+  listen_addr="$(prompt_default "请输入监听地址" "${cur_listen}")"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "${cur_port}")"
+  network="$(prompt_relay_network_default "${cur_network}")"
+  target_host="$(prompt_default "请输入后端目标地址（落地机 IP/域名）" "${cur_target_host}")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "${cur_target_port}")"
+
+  echo
+  echo "当前出口标签：${cur_outbound}"
+  if confirm_default_no "是否重新选择出口标签？"; then
+    route_outbound="$(select_route_outbound_tag)" || {
+      pause_enter
+      return 1
+    }
+  else
+    route_outbound="${cur_outbound}"
+  fi
+
+  echo
+  echo "========== 修改预览 =========="
+  echo "实例标签       : ${tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.edit-direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+outbounds = cfg.setdefault("outbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+# 如果要走 direct，但当前配置里没有 direct outbound，就自动补一个
+has_direct = False
+for ob in outbounds:
+    if str(ob.get("tag", "") or "") == "direct" or str(ob.get("type", "") or "") == "direct":
+        has_direct = True
+        break
+
+if route_outbound == "direct" and not has_direct:
+    outbounds.insert(0, {
+        "type": "direct",
+        "tag": "direct"
+    })
+
+updated = False
+for ib in inbounds:
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    ib["listen"] = listen_addr
+    ib["listen_port"] = int(listen_port)
+    ib["override_address"] = target_host
+    ib["override_port"] = int(target_port)
+
+    if network in ("tcp", "udp"):
+        ib["network"] = network
+    else:
+        ib.pop("network", None)
+
+    updated = True
+    break
+
+if not updated:
+    raise SystemExit(1)
+
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "修改中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+    
+  ok "已修改中转实例：${tag}"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_singbox_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "         Sing-box 固定目标中转"
+    echo "======================================"
+    echo "1. 新建固定目标中转"
+    echo "2. 查看当前中转实例"
+    echo "3. 修改指定中转实例"
+    echo "4. 删除指定中转实例"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) deploy_direct_relay ;;
+      2) show_current_relays ;;
+      3) edit_direct_relay_instance ;;
+      4) delete_direct_relay_instance ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              中转管理"
+    echo "======================================"
+    echo "1. Sing-box 固定目标中转"
+    echo "2. Realm 中转"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-2]: " choice
+    case "${choice:-}" in
+      1) menu_singbox_relay_management ;;
+      2) menu_realm_relay_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+\t' read -r ctag ctype <<<"${conflict}"
+    err "端口 ${port}/${network} 已被 sing-box 入站占用：${ctag}（${ctype}）" >&2
+    return 1
+  fi
+
+  conflict="$(system_port_conflict "${port}" "${network}" "${exclude_tag}" 2>/dev/null || true)"
+  if [ -n "${conflict}" ]; then
+    local proto detail
+    IFS=
+  restart_singbox_service_safe
+}
+
+save_reality_meta() {
+  local reality_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local user_uuid="$5"
+  local flow="$6"
+  local server_name="$7"
+  local handshake_server="$8"
+  local handshake_port="$9"
+  local public_key="${10}"
+  local private_key="${11}"
+  local short_id="${12}"
+  local tcp_fast_open="${13}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${reality_tag}")"
+
+  python3 - "${meta_file}"     "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${user_uuid}" "${flow}" "${server_name}" "${handshake_server}"     "${handshake_port}" "${public_key}" "${private_key}" "${short_id}"     "${tcp_fast_open}" "${DEFAULT_CLIENT_FP}" <<'PY'
+import json, sys
+(
+    path, tag, host, port, user_name, uuid, flow, server_name,
+    handshake_server, handshake_port, public_key, private_key,
+    short_id, tcp_fast_open, fingerprint
+) = sys.argv[1:]
+data = {
+    "protocol": "vless-reality",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "flow": flow,
+    "server_name": server_name,
+    "handshake_server": handshake_server,
+    "handshake_port": int(handshake_port),
+    "public_key": public_key,
+    "private_key": private_key,
+    "short_id": short_id,
+    "tcp_fast_open": tcp_fast_open,
+    "type": "tcp",
+    "security": "reality",
+    "fingerprint": fingerprint,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vless_reality() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local reality_tag
+  local listen_addr listen_port user_name user_uuid
+  local server_name handshake_server handshake_port
+  local short_id keys private_key public_key
+  local connect_host tcp_fast_open tmp_file
+  local default_host flow
+
+  default_host="$(detect_default_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP"
+
+  reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_listen_port)"
+  user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
+  user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
+  server_name="$(prompt_default "请输入伪装域名 server_name" "download.visualstudio.microsoft.com")"
+  handshake_server="$(prompt_default "请输入 Reality 握手目标域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手目标端口" "443")"
+  short_id="$(prompt_default "请输入 short_id" "$(gen_short_id)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  flow="xtls-rprx-vision"
+
+  if confirm_default_no "开启 TCP Fast Open 吗？"; then
+    tcp_fast_open="true"
+  else
+    tcp_fast_open="false"
+  fi
+
+  keys="$(gen_reality_keypair)" || {
+    pause_enter
+    return 1
+  }
+
+  private_key="${keys%%|*}"
+  public_key="${keys##*|}"
+
+  echo
+  echo "========== 配置预览 =========="
+  echo "实例标签       : ${reality_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${user_uuid}"
+  echo "server_name    : ${server_name}"
+  echo "握手目标       : ${handshake_server}:${handshake_port}"
+  echo "short_id       : ${short_id}"
+  echo "连接地址       : ${connect_host}"
+  echo "TCP Fast Open  : ${tcp_fast_open}"
+  echo "=============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${reality_tag}" "${listen_addr}" "${listen_port}" "${tcp_fast_open}" \
+    "${user_name}" "${user_uuid}" "${flow}" \
+    "${server_name}" "${handshake_server}" "${handshake_port}" \
+    "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+    path_cfg, reality_tag, listen_addr, listen_port, tcp_fast_open,
+    user_name, user_uuid, flow,
+    server_name, handshake_server, handshake_port,
+    private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+reality_obj = {
+    "type": "vless",
+    "tag": reality_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "tcp_fast_open": (tcp_fast_open == "true"),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": user_uuid,
+            "flow": flow
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "server_name": server_name,
+        "reality": {
+            "enabled": True,
+            "handshake": {
+                "server": handshake_server,
+                "server_port": int(handshake_port)
+            },
+            "private_key": private_key,
+            "short_id": [short_id]
+        }
+    }
+}
+
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == reality_tag:
+        inbounds[i] = reality_obj
+        break
+else:
+    inbounds.append(reality_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Reality 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${reality_tag}" "reality" "${listen_addr}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}"
+
+  ok "VLESS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${reality_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "流控        : ${flow}"
+  echo "传输        : tcp"
+  echo "TLS         : reality"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${reality_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS Reality URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_vless_reality() {
+  deploy_vless_reality
+}
+
+gen_password() {
+  if has_cmd openssl; then
+    openssl rand -hex 12
+    return 0
+  fi
+
+  if has_cmd python3; then
+    python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(18))
+PY
+    return 0
+  fi
+
+  echo "pass-$(date +%s)"
+}
+
+gen_self_signed_cert() {
+  local server_name="$1"
+  local cert_dir="${BASE_DIR}/certs"
+  local cert_path="${cert_dir}/hy2-selfsigned.crt"
+  local key_path="${cert_dir}/hy2-selfsigned.key"
+  local san tmp_conf
+
+  if ! has_cmd openssl; then
+    err "未找到 openssl，无法自动生成自签证书"
+    return 1
+  fi
+
+  mkdir -p "${cert_dir}" "${TMP_DIR}"
+
+  if is_valid_ip "${server_name}"; then
+    san="IP:${server_name}"
+  else
+    san="DNS:${server_name}"
+  fi
+
+  tmp_conf="${TMP_DIR}/openssl-hy2-selfsigned.cnf"
+
+  cat > "${tmp_conf}" <<EOF
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+CN = ${server_name}
+
+[v3_req]
+subjectAltName = ${san}
+extendedKeyUsage = serverAuth
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+  if ! openssl req -x509 -nodes -newkey rsa:2048 \
+    -days 3650 \
+    -keyout "${key_path}" \
+    -out "${cert_path}" \
+    -config "${tmp_conf}" \
+    -extensions v3_req >/dev/null 2>&1; then
+    err "生成自签证书失败"
+    return 1
+  fi
+
+  chmod 600 "${key_path}" 2>/dev/null || true
+  chmod 644 "${cert_path}" 2>/dev/null || true
+
+  printf '%s|%s\n' "${cert_path}" "${key_path}"
+}
+
+prompt_port_default() {
+  local prompt="$1"
+  local default_port="$2"
+  local port
+
+  while true; do
+    port="$(prompt_default "${prompt}" "${default_port}")"
+    case "$port" in
+      ''|*[!0-9]*)
+        echo "输入无效：端口必须是 1-65535 的数字"
+        ;;
+      *)
+        if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+          printf '%s\n' "$port"
+          return 0
+        fi
+        echo "输入无效：端口必须是 1-65535"
+        ;;
+    esac
+  done
+}
+
+ensure_inbound_meta_dir() {
+  mkdir -p "${INBOUND_META_DIR}"
+  chmod 700 "${INBOUND_META_DIR}" 2>/dev/null || true
+}
+
+inbound_meta_name_by_tag() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe='._-'))
+PY
+}
+
+inbound_meta_file_by_tag() {
+  local tag="$1"
+  local name
+  name="$(inbound_meta_name_by_tag "${tag}")"
+  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${name}"
+}
+
+next_inbound_tag_by_prefix() {
+  local prefix="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${prefix}" <<'PY'
+import json, os, re, sys
+
+cfg_path, prefix = sys.argv[1], sys.argv[2]
+nums = []
+
+if os.path.exists(cfg_path):
+    cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+    for ib in cfg.get("inbounds", []):
+        tag = str(ib.get("tag", ""))
+        m = re.fullmatch(re.escape(prefix) + r"-(\d{3})", tag)
+        if m:
+            nums.append(int(m.group(1)))
+
+n = 1
+while n in nums:
+    n += 1
+
+print(f"{prefix}-{n:03d}")
+PY
+}
+
+managed_inbound_rows() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+
+def label_for(ib):
+    typ = str(ib.get("type", "") or "")
+    tls = ib.get("tls", {}) or {}
+    if typ == "vless":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        if reality:
+            return "VLESS Reality"
+        if tls.get("enabled"):
+            return "VLESS TLS"
+        return "VLESS"
+    if typ == "hysteria2":
+        return "Hysteria2"
+    if typ == "vmess":
+        return "VMess TLS" if tls.get("enabled") else "VMess"
+    if typ == "tuic":
+        return "TUIC"
+    if typ == "anytls":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        return "AnyTLS Reality" if reality else "AnyTLS"
+    return typ or "<未知>"
+
+n = 0
+for ib in cfg.get("inbounds", []):
+    typ = str(ib.get("type", "") or "")
+    tag = str(ib.get("tag", "") or "")
+    if typ not in supported or not tag:
+        continue
+
+    n += 1
+    listen = str(ib.get("listen", "") or "")
+    port = str(ib.get("listen_port", "") or "")
+    if ":" in listen and not listen.startswith("["):
+        endpoint = f"[{listen}]:{port}" if port else f"[{listen}]"
+    else:
+        endpoint = f"{listen}:{port}" if port else (listen or "<空>")
+
+    users = ib.get("users", [])
+    user_count = len(users) if isinstance(users, list) else 0
+    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{user_count}")
+PY
+}
+
+managed_inbound_count() {
+  managed_inbound_rows | wc -l | tr -d ' '
+}
+
+show_managed_inbound_list() {
+  local service_state="inactive"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  echo "当前入站实例："
+  echo "编号 标签                     类型              监听地址                 用户"
+  echo "--------------------------------------------------------------------------------"
+
+  local found=0
+  while IFS=$'\t' read -r n tag _type label endpoint users; do
+    [ -z "${n}" ] && continue
+    found=1
+    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${users}"
+  done < <(managed_inbound_rows)
+
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无 SBM 管理的入站实例>"
+  fi
+
+  echo "--------------------------------------------------------------------------------"
+  echo "sing-box 服务：${service_state:-unknown}"
+}
+
+show_current_inbounds() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  pause_enter
+}
+
+get_managed_inbound_field_by_index() {
+  local idx="$1"
+  local field="$2"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" "${field}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+idx = int(sys.argv[2])
+field = sys.argv[3]
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+rows = [
+    ib for ib in cfg.get("inbounds", [])
+    if str(ib.get("type", "") or "") in supported and str(ib.get("tag", "") or "")
+]
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+ib = rows[idx - 1]
+if field == "tag":
+    print(str(ib.get("tag", "") or ""))
+elif field == "type":
+    print(str(ib.get("type", "") or ""))
+else:
+    raise SystemExit(1)
+PY
+}
+
+get_inbound_tag_by_index() {
+  get_managed_inbound_field_by_index "$1" "tag"
+}
+
+show_inbound_instance_detail() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tag = sys.argv[2]
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit(1)
+
+typ = str(ib.get("type", "") or "")
+listen = str(ib.get("listen", "") or "")
+port = str(ib.get("listen_port", "") or "")
+endpoint = f"[{listen}]:{port}" if ":" in listen and not listen.startswith("[") else f"{listen}:{port}"
+
+tls = ib.get("tls", {}) or {}
+reality = (tls.get("reality", {}) or {}).get("enabled") is True
+if typ == "vless":
+    label = "VLESS Reality" if reality else ("VLESS TLS" if tls.get("enabled") else "VLESS")
+elif typ == "hysteria2":
+    label = "Hysteria2"
+elif typ == "vmess":
+    label = "VMess TLS" if tls.get("enabled") else "VMess"
+elif typ == "tuic":
+    label = "TUIC"
+elif typ == "anytls":
+    label = "AnyTLS Reality" if reality else "AnyTLS"
+else:
+    label = typ
+
+users = ib.get("users", [])
+user_count = len(users) if isinstance(users, list) else 0
+server_name = str(tls.get("server_name", "") or "")
+network = str(ib.get("network", "") or "")
+transport = ib.get("transport", {}) or {}
+transport_type = str(transport.get("type", "") or "")
+
+print(f"实例标签 : {tag}")
+print(f"协议类型 : {label}")
+print(f"监听地址 : {endpoint}")
+print(f"用户数量 : {user_count}")
+if network:
+    print(f"网络类型 : {network}")
+if transport_type:
+    print(f"传输方式 : {transport_type}")
+if server_name:
+    print(f"SNI      : {server_name}")
+PY
+
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  if [ -f "${meta_file}" ]; then
+    echo "客户端信息: 已保存"
+  else
+    echo "客户端信息: 缺少元数据"
+  fi
+
+  local service_state="unknown"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+  echo "服务状态 : ${service_state}"
+}
+
+delete_legacy_inbound_meta_by_tag() {
+  local tag="$1"
+
+  case "${tag}" in
+    vless-reality-in|reality-*|reality*)
+      rm -f "${BASE_DIR}/reality-meta.json"
+      ;;
+    hy2-in|hy2-*|hy2*)
+      rm -f "${BASE_DIR}/hy2-meta.json"
+      ;;
+    vmess-in|vmess-*|vmess*)
+      rm -f "${BASE_DIR}/vmess-meta.json"
+      rm -rf "${BASE_DIR}/vmess-meta"
+      ;;
+    tuic-in|tuic-*|tuic*)
+      rm -f "${BASE_DIR}/tuic-meta.json"
+      ;;
+    trojan-in|trojan-*|trojan*)
+      rm -f "${BASE_DIR}/trojan-meta.json"
+      ;;
+  esac
+}
+
+delete_inbound_instance_by_tag() {
+  local tag="$1"
+  need_root
+  require_config_file || return 1
+  ensure_inbound_meta_dir
+
+  echo "准备删除入站实例：${tag}"
+  show_inbound_instance_detail "${tag}" || {
+    err "未找到入站实例：${tag}"
+    pause_enter
+    return 1
+  }
+  echo
+
+  if ! confirm_default_no "确认删除该实例吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  local tmp_file meta_file
+  tmp_file="${TMP_DIR}/config.delete-inbound.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+path_cfg, tag = sys.argv[1:]
+cfg = json.load(open(path_cfg, "r", encoding="utf-8"))
+inbounds = cfg.get("inbounds", [])
+
+before = len(inbounds)
+inbounds = [ib for ib in inbounds if str(ib.get("tag", "") or "") != tag]
+if len(inbounds) == before:
+    raise SystemExit(1)
+
+cfg["inbounds"] = inbounds
+with open(path_cfg, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除入站实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败；如存在上一份配置，已尝试自动回滚"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+  delete_legacy_inbound_meta_by_tag "${tag}"
+
+  ok "已删除入站实例：${tag}"
+  pause_enter
+}
+
+delete_inbound_instance() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  echo
+
+  local idx tag
+  idx="$(prompt_required "请输入要删除的入站编号")"
+  tag="$(get_managed_inbound_field_by_index "${idx}" "tag" 2>/dev/null || true)"
+  if [ -z "${tag}" ]; then
+    err "入站编号无效"
+    pause_enter
+    return 1
+  fi
+
+  delete_inbound_instance_by_tag "${tag}"
+}
+
+menu_inbound_instance_detail() {
+  local tag="$1"
+  local typ="$2"
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_inbound_instance_detail "${tag}" || {
+      err "实例已不存在：${tag}"
+      pause_enter
+      return
+    }
+    echo "--------------------------------------"
+    echo "1. 查看详情"
+    echo "2. 导出客户端配置"
+    if [ "${typ}" = "vless" ]; then
+      echo "3. 用户管理"
+    else
+      echo "3. 用户管理（仅 VLESS）"
+    fi
+    echo "4. 删除实例"
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1)
+        clear
+        echo "======================================"
+        echo "              实例详情"
+        echo "======================================"
+        show_inbound_instance_detail "${tag}"
+        pause_enter
+        ;;
+      2)
+        export_inbound_instance_by_tag "${tag}" "${typ}"
+        ;;
+      3)
+        if [ "${typ}" = "vless" ]; then
+          menu_vless_user_management_for_tag "${tag}"
+        else
+          warn "当前协议暂不支持独立用户管理"
+          pause_enter
+        fi
+        ;;
+      4)
+        delete_inbound_instance_by_tag "${tag}"
+        return
+        ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_inbound_instance_management() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_managed_inbound_list
+    echo
+    echo "a. 导出全部 URI"
+    echo "0. 返回"
+    echo
+
+    local choice tag typ
+    read -r -p "请选择实例编号 / a / 0: " choice
+    case "${choice:-}" in
+      0) return ;;
+      a|A)
+        export_all_uris
+        ;;
+      ''|*[!0-9]*)
+        echo "无效选项"
+        sleep 1
+        ;;
+      *)
+        tag="$(get_managed_inbound_field_by_index "${choice}" "tag" 2>/dev/null || true)"
+        typ="$(get_managed_inbound_field_by_index "${choice}" "type" 2>/dev/null || true)"
+        if [ -z "${tag}" ] || [ -z "${typ}" ]; then
+          err "实例编号无效"
+          sleep 1
+          continue
+        fi
+        menu_inbound_instance_detail "${tag}" "${typ}"
+        ;;
+    esac
+  done
+}
+
+
+save_hy2_meta() {
+  local hy2_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local password="$5"
+  local server_name="$6"
+  local obfs_password="$7"
+  local up_mbps="$8"
+  local down_mbps="$9"
+  local cert_mode="${10}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${hy2_tag}")"
+
+  python3 - "${meta_file}"     "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${password}" "${server_name}" "${obfs_password}" "${up_mbps}"     "${down_mbps}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, password, server_name, obfs_password, up_mbps, down_mbps, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "hysteria2",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "password": password,
+    "server_name": server_name,
+    "cert_mode": cert_mode,
+    "obfs_password": obfs_password,
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_hysteria2() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local hy2_tag
+  local listen_addr listen_port user_name password
+  local cert_path key_path connect_host server_name
+  local up_mbps down_mbps obfs_password use_obfs
+  local cert_mode default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  hy2_tag="$(prompt_default "请输入 Hysteria2 实例标签" "$(next_inbound_tag_by_prefix "hy2")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入 Hysteria2 监听端口" "8443")"
+  user_name="$(prompt_default "请输入 Hysteria2 用户备注" "${hy2_tag}")"
+  password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  up_mbps="$(prompt_default "请输入上行带宽 up_mbps" "100")"
+  down_mbps="$(prompt_default "请输入下行带宽 down_mbps" "100")"
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  if confirm_default_no "启用 salamander obfs 吗？"; then
+    use_obfs="true"
+    obfs_password="$(prompt_default "请输入 obfs 密码" "$(gen_password)")"
+  else
+    use_obfs="false"
+    obfs_password=""
+  fi
+
+  echo
+  echo "========== Hysteria2 配置预览 =========="
+  echo "实例标签       : ${hy2_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "客户端 SNI     : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "up_mbps        : ${up_mbps}"
+  echo "down_mbps      : ${down_mbps}"
+  echo "obfs           : ${use_obfs}"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs_password  : ${obfs_password}"
+  fi
+  echo "========================================"
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.hy2.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${hy2_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${password}" \
+    "${cert_path}" "${key_path}" "${up_mbps}" "${down_mbps}" \
+    "${use_obfs}" "${obfs_password}" <<'PY'
+import json, sys
+
+(
+    path_cfg, hy2_tag, listen_addr, listen_port, user_name, password,
+    cert_path, key_path, up_mbps, down_mbps,
+    use_obfs, obfs_password
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+hy2_obj = {
+    "type": "hysteria2",
+    "tag": hy2_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
+    "users": [
+        {
+            "name": user_name,
+            "password": password
+        }
+    ],
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+if use_obfs == "true":
+    hy2_obj["obfs"] = {
+        "type": "salamander",
+        "password": obfs_password
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == hy2_tag:
+        inbounds[i] = hy2_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(hy2_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 Hysteria2 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_hy2_meta "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${password}" "${server_name}" "${obfs_password}" "${up_mbps}" "${down_mbps}" "${cert_mode}"
+
+  ok "Hysteria2 部署完成"
+  echo
+  echo "------ Hysteria2 客户端关键参数 ------"
+  echo "实例标签    : ${hy2_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "用户名备注  : ${user_name}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "协议        : hysteria2"
+  echo "传输        : UDP / QUIC"
+  echo "up/down     : ${up_mbps}/${down_mbps} Mbps"
+  if [ "${use_obfs}" = "true" ]; then
+    echo "obfs        : salamander"
+    echo "obfs密码    : ${obfs_password}"
+  fi
+  echo "--------------------------------------"
+  echo
+
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式    : 自签证书"
+    echo "客户端建议  :"
+    echo "  1. 更安全：在客户端 tls.certificate_path 中导入这张自签证书"
+    echo "  2. 更省事：在客户端 tls.insecure = true（仅测试/临时使用）"
+    echo "自签证书路径: ${cert_path}"
+  else
+    echo "证书模式    : 正式证书"
+    echo "客户端建议  : 正常校验证书即可"
+  fi
+  echo
+  echo "注意：如果你用官方 Hysteria2 客户端，常见的 userpass 实际要填成 <用户名>:<密码> 的组合。"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local hy2_meta hy2_uri
+  hy2_meta="$(inbound_meta_file_by_tag "${hy2_tag}")"
+  hy2_uri="$(build_hy2_uri "${hy2_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "Hysteria2 URI" "${hy2_uri}"
+
+  pause_enter
+}
+
+menu_deploy_hysteria2() {
+  deploy_hysteria2
+}
+
+gen_uuid_value() {
+  if has_cmd sing-box; then
+    sing-box generate uuid 2>/dev/null && return 0
+  fi
+
+  if has_cmd uuidgen; then
+    uuidgen | tr 'A-Z' 'a-z'
+    return 0
+  fi
+
+  python3 - <<'PY'
+import uuid
+print(str(uuid.uuid4()))
+PY
+}
+
+gen_random_path() {
+  if has_cmd openssl; then
+    echo "/$(openssl rand -hex 4)"
+    return 0
+  fi
+
+  python3 - <<'PY'
+import secrets
+print("/" + secrets.token_hex(4))
+PY
+}
+
+save_vmess_meta() {
+  local vmess_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local transport_type="$6"
+  local tls_enabled="$7"
+  local server_name="$8"
+  local path="$9"
+  local host="${10}"
+  local method="${11}"
+  local cert_mode="${12}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${vmess_tag}")"
+
+  python3 - "${meta_file}"     "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}"     "${path}" "${host}" "${method}" "${cert_mode}" <<'PY'
+import json, sys
+path_out, tag, connect_host, port, user_name, uuid, transport_type, tls_enabled, server_name, ws_path, host, method, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "vmess",
+    "tag": tag,
+    "connect_host": connect_host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "transport_type": transport_type,
+    "tls_enabled": tls_enabled,
+    "server_name": server_name,
+    "path": ws_path,
+    "host": host,
+    "method": method,
+    "cert_mode": cert_mode,
+}
+with open(path_out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_vmess() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+
+  local transport_choice transport_type tls_choice tls_enabled cert_mode
+  local listen_addr listen_port user_name uuid vmess_tag
+  local connect_host server_name cert_path key_path
+  local path host method default_host tmp_file backend cert_pair default_tag_prefix
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  echo
+  echo "请选择 VMess 传输方式："
+  echo "1. HTTP"
+  echo "2. WebSocket"
+  read -r -p "请选择 [1-2]（默认 2）: " transport_choice
+  transport_choice="${transport_choice:-2}"
+
+  case "${transport_choice}" in
+    1)
+      transport_type="http"
+      default_tag_prefix="vmess-http"
+      ;;
+    2)
+      transport_type="ws"
+      default_tag_prefix="vmess-ws"
+      ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  vmess_tag="$(prompt_default "请输入 VMess 实例标签" "$(next_inbound_tag_by_prefix "${default_tag_prefix}")")"
+
+  echo
+  echo "是否启用 TLS："
+  echo "1. 开启"
+  echo "2. 关闭"
+  read -r -p "请选择 [1-2]（默认 2）: " tls_choice
+  tls_choice="${tls_choice:-2}"
+
+  case "${tls_choice}" in
+    1) tls_enabled="true" ;;
+    2) tls_enabled="false" ;;
+    *)
+      err "无效选项"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  listen_addr="$(prompt_listen_addr)"
+  if [ "${tls_enabled}" = "true" ]; then
+    listen_port="$(prompt_port_default "请输入 VMess 监听端口" "443")"
+  else
+    if [ "${transport_type}" = "http" ]; then
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "8080")"
+    else
+      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "80")"
+    fi
+  fi
+
+  user_name="$(prompt_default "请输入 VMess 用户备注" "${vmess_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+
+  if [ "${transport_type}" = "http" ]; then
+    path="$(prompt_default "请输入 HTTP path" "/")"
+    host="$(prompt_default "请输入 HTTP host（留空为不设置）" "")"
+    method="$(prompt_default "请输入 HTTP method" "GET")"
+  else
+    path="$(prompt_default "请输入 WebSocket path" "$(gen_random_path)")"
+    host="$(prompt_default "请输入 WS Host 头（留空为不设置）" "")"
+    method=""
+  fi
+
+  server_name=""
+  cert_path=""
+  key_path=""
+  cert_mode="0"
+
+  if [ "${tls_enabled}" = "true" ]; then
+    server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+    echo
+    echo "证书模式："
+    echo "1. 正式证书"
+    echo "2. 自签证书"
+    read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+    cert_mode="${cert_mode:-1}"
+
+    if [ "${cert_mode}" = "2" ]; then
+      cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+        pause_enter
+        return 1
+      }
+      cert_path="${cert_pair%%|*}"
+      key_path="${cert_pair##*|}"
+
+      echo
+      echo "已自动生成自签证书："
+      echo "certificate_path : ${cert_path}"
+      echo "key_path         : ${key_path}"
+      echo
+    else
+      cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+      key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+    fi
+
+    if [ ! -f "${cert_path}" ]; then
+      err "证书文件不存在：${cert_path}"
+      pause_enter
+      return 1
+    fi
+
+    if [ ! -f "${key_path}" ]; then
+      err "私钥文件不存在：${key_path}"
+      pause_enter
+      return 1
+    fi
+  fi
+
+  echo
+  echo "========== VMess 配置预览 =========="
+  echo "实例标签       : ${vmess_tag}"
+  echo "传输方式       : ${transport_type}"
+  echo "TLS            : ${tls_enabled}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "alterId        : 0"
+  echo "path           : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host      : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method         : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "server_name    : ${server_name}"
+    if [ "${cert_mode}" = "2" ]; then
+      echo "证书模式       : 自签证书"
+    else
+      echo "证书模式       : 正式证书"
+    fi
+    echo "证书路径       : ${cert_path}"
+    echo "私钥路径       : ${key_path}"
+  fi
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.vmess.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${vmess_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" \
+    "${transport_type}" "${path}" "${host}" "${method}" \
+    "${tls_enabled}" "${server_name}" "${cert_path}" "${key_path}" <<'PY'
+import json, sys
+
+(
+    path_cfg, vmess_tag, listen_addr, listen_port, user_name, uuid,
+    transport_type, req_path, host, method,
+    tls_enabled, server_name, cert_path, key_path
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+vmess_obj = {
+    "type": "vmess",
+    "tag": vmess_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "alterId": 0
+        }
+    ]
+}
+
+if transport_type == "http":
+    transport = {
+        "type": "http",
+        "path": req_path,
+        "method": method or "GET"
+    }
+    if host:
+        transport["host"] = [host]
+elif transport_type == "ws":
+    transport = {
+        "type": "ws",
+        "path": req_path
+    }
+    if host:
+        transport["headers"] = {"Host": host}
+else:
+    raise SystemExit("unknown transport type")
+
+vmess_obj["transport"] = transport
+
+if tls_enabled == "true":
+    vmess_obj["tls"] = {
+        "enabled": True,
+        "server_name": server_name,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == vmess_tag:
+        inbounds[i] = vmess_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(vmess_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VMess 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vmess_meta "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}" "${path}" "${host}" "${method}" "${cert_mode}"
+
+  ok "VMess 部署完成"
+  echo
+  echo "------ VMess 客户端关键参数 ------"
+  echo "实例标签    : ${vmess_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "alterId     : 0"
+  echo "传输        : ${transport_type}"
+  echo "path        : ${path}"
+  if [ -n "${host}" ]; then
+    echo "host/Host   : ${host}"
+  fi
+  if [ "${transport_type}" = "http" ]; then
+    echo "method      : ${method}"
+  fi
+  if [ "${tls_enabled}" = "true" ]; then
+    echo "TLS         : enabled"
+    echo "SNI         : ${server_name}"
+  else
+    echo "TLS         : disabled"
+  fi
+  echo "----------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local vmess_meta vmess_uri
+  vmess_meta="$(inbound_meta_file_by_tag "${vmess_tag}")"
+  vmess_uri="$(build_vmess_uri "${vmess_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "VMess URI" "${vmess_uri}"
+
+  pause_enter
+}
+
+menu_deploy_vmess() {
+  deploy_vmess
+}
+
+save_tuic_meta() {
+  local tuic_tag="$1"
+  local connect_host="$2"
+  local listen_port="$3"
+  local user_name="$4"
+  local uuid="$5"
+  local password="$6"
+  local server_name="$7"
+  local congestion_control="$8"
+  local zero_rtt_handshake="$9"
+  local heartbeat="${10}"
+  local cert_mode="${11}"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tuic_tag}")"
+
+  python3 - "${meta_file}"     "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${password}" "${server_name}" "${congestion_control}"     "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, uuid, password, server_name, congestion, zero_rtt, heartbeat, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "tuic",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "password": password,
+    "server_name": server_name,
+    "congestion_control": congestion,
+    "zero_rtt_handshake": zero_rtt,
+    "heartbeat": heartbeat,
+    "cert_mode": cert_mode,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+deploy_tuic() {
+  need_root
+
+  if ! has_cmd sing-box; then
+    err "未检测到 sing-box，请先安装内核"
+    pause_enter
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local tuic_tag
+  local listen_addr listen_port user_name uuid password
+  local connect_host server_name cert_path key_path cert_mode
+  local congestion_control zero_rtt_choice zero_rtt_handshake
+  local heartbeat default_host tmp_file backend cert_pair
+
+  default_host="$(detect_connect_host)"
+  [ -z "${default_host}" ] && default_host="YOUR_SERVER_IP_OR_DOMAIN"
+
+  tuic_tag="$(prompt_default "请输入 TUIC 实例标签" "$(next_inbound_tag_by_prefix "tuic")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入 TUIC 监听端口" "443")"
+  user_name="$(prompt_default "请输入 TUIC 用户备注" "${tuic_tag}")"
+  uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
+  password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
+  server_name="$(prompt_required "请输入 TLS server_name / SNI")"
+
+  echo
+  echo "证书模式："
+  echo "1. 正式证书"
+  echo "2. 自签证书"
+  read -r -p "请选择 [1-2]（默认 1）: " cert_mode
+  cert_mode="${cert_mode:-1}"
+
+  if [ "${cert_mode}" = "2" ]; then
+    cert_pair="$(gen_self_signed_cert "${server_name}")" || {
+      pause_enter
+      return 1
+    }
+    cert_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+
+    echo
+    echo "已自动生成自签证书："
+    echo "certificate_path : ${cert_path}"
+    echo "key_path         : ${key_path}"
+    echo
+  else
+    cert_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  fi
+
+  if [ ! -f "${cert_path}" ]; then
+    err "证书文件不存在：${cert_path}"
+    pause_enter
+    return 1
+  fi
+
+  if [ ! -f "${key_path}" ]; then
+    err "私钥文件不存在：${key_path}"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  echo "请选择 congestion_control："
+  echo "1. cubic"
+  echo "2. new_reno"
+  echo "3. bbr"
+  read -r -p "请选择 [1-3]（默认 1）: " congestion_control
+  case "${congestion_control:-1}" in
+    1) congestion_control="cubic" ;;
+    2) congestion_control="new_reno" ;;
+    3) congestion_control="bbr" ;;
+    *) congestion_control="cubic" ;;
+  esac
+
+  echo
+  echo "是否开启 zero_rtt_handshake："
+  echo "1. 关闭（推荐）"
+  echo "2. 开启"
+  read -r -p "请选择 [1-2]（默认 1）: " zero_rtt_choice
+  case "${zero_rtt_choice:-1}" in
+    1) zero_rtt_handshake="false" ;;
+    2) zero_rtt_handshake="true" ;;
+    *) zero_rtt_handshake="false" ;;
+  esac
+
+  heartbeat="$(prompt_default "请输入 heartbeat（默认 10s）" "10s")"
+
+  echo
+  echo "========== TUIC 配置预览 =========="
+  echo "实例标签       : ${tuic_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}/udp"
+  echo "用户备注       : ${user_name}"
+  echo "UUID           : ${uuid}"
+  echo "密码           : ${password}"
+  echo "客户端连接地址 : ${connect_host}"
+  echo "SNI            : ${server_name}"
+  if [ "${cert_mode}" = "2" ]; then
+    echo "证书模式       : 自签证书"
+  else
+    echo "证书模式       : 正式证书"
+  fi
+  echo "证书路径       : ${cert_path}"
+  echo "私钥路径       : ${key_path}"
+  echo "congestion     : ${congestion_control}"
+  echo "zero_rtt       : ${zero_rtt_handshake}"
+  echo "heartbeat      : ${heartbeat}"
+  echo "==================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.tuic.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tuic_tag}" "${listen_addr}" "${listen_port}" "${user_name}" "${uuid}" "${password}" \
+    "${cert_path}" "${key_path}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" <<'PY'
+import json, sys
+
+(
+    path_cfg, tuic_tag, listen_addr, listen_port, user_name, uuid, password,
+    cert_path, key_path, congestion_control, zero_rtt_handshake, heartbeat
+) = sys.argv[1:]
+
+cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+tuic_obj = {
+    "type": "tuic",
+    "tag": tuic_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "users": [
+        {
+            "name": user_name,
+            "uuid": uuid,
+            "password": password
+        }
+    ],
+    "congestion_control": congestion_control,
+    "zero_rtt_handshake": (zero_rtt_handshake == "true"),
+    "heartbeat": heartbeat,
+    "tls": {
+        "enabled": True,
+        "certificate_path": cert_path,
+        "key_path": key_path
+    }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == tuic_tag:
+        inbounds[i] = tuic_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(tuic_obj)
+
+with open(path_cfg, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 TUIC 入站失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_tuic_meta "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}" "${uuid}" "${password}" "${server_name}" "${congestion_control}" "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}"
+
+  ok "TUIC 部署完成"
+  echo
+  echo "------ TUIC 客户端关键参数 ------"
+  echo "实例标签    : ${tuic_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${uuid}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "congestion  : ${congestion_control}"
+  echo "zero_rtt    : ${zero_rtt_handshake}"
+  echo "heartbeat   : ${heartbeat}"
+  echo "--------------------------------"
+  echo
+
+  if [ "${zero_rtt_handshake}" = "true" ]; then
+    echo "警告：zero_rtt_handshake 已开启，存在重放攻击风险，不推荐长期使用。"
+    echo
+  fi
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "udp"; then
+          ok "已放行 ${listen_port}/udp"
+        else
+          err "放行 ${listen_port}/udp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  local tuic_meta tuic_uri
+  tuic_meta="$(inbound_meta_file_by_tag "${tuic_tag}")"
+  tuic_uri="$(build_tuic_uri "${tuic_meta}" 2>/dev/null || true)"
+  show_uri_and_qr "TUIC URI" "${tuic_uri}"
+
+  pause_enter
+}
+
+menu_deploy_tuic() {
+  deploy_tuic
+}
+
+# ---------------------------
+# AnyTLS helpers
+# ---------------------------
+
+detect_default_connect_host() {
+  local host=""
+
+  # 优先取 IPv4
+  if has_cmd curl; then
+    host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(curl -4 --noproxy '*' -fsSL --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  elif has_cmd wget; then
+    host="$(wget -4 -qO- --timeout=5 https://api.ip.sb/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ifconfig.me/ip 2>/dev/null || true)"
+    [ -n "${host}" ] || host="$(wget -4 -qO- --timeout=5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
+  fi
+
+  host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+
+  # 再兜底
+  if [ -z "${host}" ]; then
+    host="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    host="$(printf '%s' "${host}" | tr -d '\r\n[:space:]')"
+  fi
+
+  [ -z "${host}" ] && host="127.0.0.1"
+  printf '%s\n' "${host}"
+}
+
+anytls_rand_port() {
+  python3 - <<'PY'
+import random
+print(random.randint(20000, 50000))
+PY
+}
+
+anytls_rand_password() {
+  python3 - <<'PY'
+import secrets, base64
+raw = secrets.token_bytes(18)
+print(base64.urlsafe_b64encode(raw).decode().rstrip('='))
+PY
+}
+
+anytls_rand_short_id() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(4))
+PY
+}
+
+anytls_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_anytls_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local password="$7"
+  local server_name="$8"
+  local cert_mode="$9"
+  local certificate_path="${10}"
+  local key_path="${11}"
+  local reality_public_key="${12}"
+  local reality_private_key="${13}"
+  local reality_short_id="${14}"
+  local handshake_server="${15}"
+  local handshake_port="${16}"
+  local utls_fingerprint="${17:-chrome}"
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" "${utls_fingerprint}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, password, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port, utls_fingerprint
+) = sys.argv[1:]
+
+data = {
+  "protocol": "anytls",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "password": password,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_enabled": mode == "reality",
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443,
+  "utls_fingerprint": utls_fingerprint
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_anytls_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+generate_anytls_reality_keypair() {
+  local out priv pub
+
+  if ! has_cmd sing-box; then
+    err "未找到 sing-box，无法生成 Reality 密钥"
+    return 1
+  fi
+
+  out="$(sing-box generate reality-keypair 2>/dev/null)" || return 1
+  priv="$(printf '%s\n' "${out}" | awk -F': ' '/Private/ {print $2; exit}')"
+  pub="$(printf '%s\n' "${out}" | awk -F': ' '/Public/  {print $2; exit}')"
+
+  if [ -z "${priv}" ] || [ -z "${pub}" ]; then
+    return 1
+  fi
+
+  printf '%s|%s\n' "${priv}" "${pub}"
+}
+
+deploy_anytls_tls() {
+  need_root
+
+  local cert_mode="$1"  # 1=正式证书 2=自签证书
+  local tag listen listen_port user_name password connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_anytls_self_signed_cert "${tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.anytls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, password, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443" "chrome"
+
+  ok "AnyTLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "证书模式    : $([ "${cert_mode}" = "1" ] && echo 正式证书 || echo 自签证书)"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "----------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+deploy_anytls_reality() {
+  need_root
+
+  local tag listen listen_port user_name password connect_host server_name
+  local handshake_server handshake_port short_id keypair private_key public_key tmp_file
+
+  tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
+  user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
+  password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI")"
+  handshake_server="$(prompt_default "请输入 Reality 握手域名" "${server_name}")"
+  handshake_port="$(prompt_default "请输入 Reality 握手端口" "443")"
+  short_id="$(prompt_default "请输入 Reality short_id" "$(anytls_rand_short_id)")"
+
+  keypair="$(generate_anytls_reality_keypair)" || {
+    err "生成 Reality 密钥失败"
+    pause_enter
+    return 1
+  }
+  private_key="${keypair%%|*}"
+  public_key="${keypair##*|}"
+
+  tmp_file="${TMP_DIR}/config.anytls.reality.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" "${listen}" "${listen_port}" "${user_name}" "${password}" "${handshake_server}" "${handshake_port}" "${private_key}" "${short_id}" <<'PY'
+import json, sys
+
+(
+  cfg_path, tag, listen, listen_port, user_name, password,
+  handshake_server, handshake_port, private_key, short_id
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "anytls",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "password": password
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "reality": {
+      "enabled": True,
+      "handshake": {
+        "server": handshake_server,
+        "server_port": int(handshake_port)
+      },
+      "private_key": private_key,
+      "short_id": [short_id]
+    }
+  }
+}
+
+replaced = False
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    replaced = True
+    break
+
+if not replaced:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 AnyTLS + Reality 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_anytls_meta \
+    "${tag}" "reality" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${password}" "${server_name}" "0" \
+    "" "" \
+    "${public_key}" "${private_key}" "${short_id}" "${handshake_server}" "${handshake_port}" "chrome"
+
+  ok "AnyTLS + Reality 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "密码        : ${password}"
+  echo "SNI         : ${server_name}"
+  echo "Public Key  : ${public_key}"
+  echo "Short ID    : ${short_id}"
+  echo "握手域名    : ${handshake_server}:${handshake_port}"
+  echo "uTLS 指纹   : chrome"
+  echo "----------------------------"
+  echo
+
+  local meta_file
+  meta_file="$(anytls_meta_file_by_tag "${tag}")"
+  echo "------ AnyTLS + Reality 客户端 sing-box JSON ------"
+  build_anytls_singbox_json_from_meta "${meta_file}" || true
+  echo "--------------------------------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_deploy_anytls() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "             AnyTLS 入站"
+    echo "======================================"
+    echo "1. AnyTLS（正式证书）"
+    echo "2. AnyTLS（自签证书）"
+    echo "3. AnyTLS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_anytls_tls "1" ;;
+      2) deploy_anytls_tls "2" ;;
+      3) deploy_anytls_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+vless_meta_file_by_tag() {
+  inbound_meta_file_by_tag "$1"
+}
+
+save_vless_meta() {
+  local tag="$1"
+  local mode="$2"                  # tls / reality
+  local listen="$3"
+  local listen_port="$4"
+  local connect_host="$5"
+  local user_name="$6"
+  local user_uuid="$7"
+  local flow="$8"
+  local server_name="$9"
+  local cert_mode="${10}"
+  local certificate_path="${11}"
+  local key_path="${12}"
+  local reality_public_key="${13}"
+  local reality_private_key="${14}"
+  local reality_short_id="${15}"
+  local handshake_server="${16}"
+  local handshake_port="${17}"
+
+  local meta_file
+  meta_file="$(vless_meta_file_by_tag "${tag}")"
+
+  python3 - "${meta_file}" \
+    "${tag}" "${mode}" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "${flow}" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "${reality_public_key}" "${reality_private_key}" "${reality_short_id}" \
+    "${handshake_server}" "${handshake_port}" <<'PY'
+import json, sys
+
+(
+  path, tag, mode, listen, listen_port, connect_host,
+  user_name, user_uuid, flow, server_name, cert_mode,
+  certificate_path, key_path,
+  reality_public_key, reality_private_key, reality_short_id,
+  handshake_server, handshake_port
+) = sys.argv[1:]
+
+data = {
+  "protocol": "vless",
+  "tag": tag,
+  "mode": mode,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "connect_host": connect_host,
+  "user_name": user_name,
+  "user_uuid": user_uuid,
+  "flow": flow,
+  "server_name": server_name,
+  "cert_mode": cert_mode,
+  "certificate_path": certificate_path,
+  "key_path": key_path,
+  "reality_public_key": reality_public_key,
+  "reality_private_key": reality_private_key,
+  "reality_short_id": reality_short_id,
+  "handshake_server": handshake_server,
+  "handshake_port": int(handshake_port) if handshake_port else 443
+}
+
+with open(path, "w", encoding="utf-8") as f:
+  json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+generate_vless_self_signed_cert() {
+  local tag="$1"
+  local sni="$2"
+
+  mkdir -p "${CONFIG_DIR}/certs"
+
+  local crt="${CONFIG_DIR}/certs/${tag}.crt"
+  local key="${CONFIG_DIR}/certs/${tag}.key"
+
+  if ! has_cmd openssl; then
+    err "缺少 openssl，无法生成自签证书"
+    return 1
+  fi
+
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "${key}" \
+    -out "${crt}" \
+    -days 3650 \
+    -subj "/CN=${sni}" >/dev/null 2>&1 || return 1
+
+  printf '%s|%s\n' "${crt}" "${key}"
+}
+
+menu_deploy_vless() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              VLESS 入站"
+    echo "======================================"
+    echo "1. VLESS + TLS（正式证书）"
+    echo "2. VLESS + TLS（自签证书）"
+    echo "3. VLESS + Reality"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) deploy_vless_tls "1" ;;
+      2) deploy_vless_tls "2" ;;
+      3) deploy_vless_reality ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+deploy_vless_tls() {
+  need_root
+
+  local cert_mode="$1"   # 1=正式证书 2=自签证书
+  local vless_tag listen listen_port user_name user_uuid connect_host server_name
+  local certificate_path="" key_path="" tmp_file
+
+  vless_tag="$(prompt_default "请输入 VLESS 实例标签" "vless-$(date +%H%M%S)")"
+  listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
+  listen_port="$(prompt_default "请输入 VLESS 监听端口" "$(random_port)")"
+  user_name="$(prompt_default "请输入 VLESS 用户备注" "vless-user1")"
+  user_uuid="$(prompt_default "请输入 VLESS UUID" "$(gen_uuid)")"
+  connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
+  server_name="$(prompt_required "请输入客户端 server_name / SNI（证书域名）")"
+
+  if [ "${cert_mode}" = "1" ]; then
+    certificate_path="$(prompt_required "请输入 TLS 证书路径 certificate_path")"
+    key_path="$(prompt_required "请输入 TLS 私钥路径 key_path")"
+  else
+    local cert_pair
+    cert_pair="$(generate_vless_self_signed_cert "${vless_tag}" "${server_name}")" || {
+      err "生成自签证书失败"
+      pause_enter
+      return 1
+    }
+    certificate_path="${cert_pair%%|*}"
+    key_path="${cert_pair##*|}"
+  fi
+
+  tmp_file="${TMP_DIR}/config.vless.tls.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${vless_tag}" "${listen}" "${listen_port}" "${user_name}" "${user_uuid}" "${certificate_path}" "${key_path}" <<'PY'
+import json, sys
+
+cfg_path, tag, listen, listen_port, user_name, user_uuid, certificate_path, key_path = sys.argv[1:]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+
+obj = {
+  "type": "vless",
+  "tag": tag,
+  "listen": listen,
+  "listen_port": int(listen_port),
+  "users": [
+    {
+      "name": user_name,
+      "uuid": user_uuid
+    }
+  ],
+  "tls": {
+    "enabled": True,
+    "certificate_path": certificate_path,
+    "key_path": key_path
+  }
+}
+
+for i, ib in enumerate(inbounds):
+  if ib.get("tag") == tag:
+    inbounds[i] = obj
+    break
+else:
+  inbounds.append(obj)
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+  json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入 VLESS + TLS 配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未写入正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  save_vless_meta \
+    "${vless_tag}" "tls" "${listen}" "${listen_port}" "${connect_host}" \
+    "${user_name}" "${user_uuid}" "" "${server_name}" "${cert_mode}" \
+    "${certificate_path}" "${key_path}" \
+    "" "" "" "" "443"
+
+  ok "VLESS + TLS 部署完成"
+  echo
+  echo "------ 客户端关键参数 ------"
+  echo "实例标签    : ${vless_tag}"
+  echo "地址        : ${connect_host}"
+  echo "端口        : ${listen_port}"
+  echo "UUID        : ${user_uuid}"
+  echo "传输        : tcp"
+  echo "TLS         : tls"
+  echo "SNI         : ${server_name}"
+  echo "备注        : ${user_name}"
+  echo "----------------------------"
+  echo
+
+  local meta_file vless_uri
+  meta_file="$(vless_meta_file_by_tag "${vless_tag}")"
+  vless_uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  show_uri_and_qr "VLESS URI" "${vless_uri}"
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+        if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+          ok "已放行 ${listen_port}/tcp"
+        else
+          err "放行 ${listen_port}/tcp 失败"
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_inbound_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              入站管理"
+    echo "======================================"
+    echo "1. 部署/重装 VLESS"
+    echo "2. 部署/重装 Hysteria2"
+    echo "3. 部署/重装 VMess"
+    echo "4. 部署/重装 TUIC"
+    echo "5. 部署/重装 AnyTLS"
+    echo "6. 中转管理"
+    echo "7. 入站实例管理"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-7]: " choice
+    case "${choice:-}" in
+      1) menu_deploy_vless ;;
+      2) menu_deploy_hysteria2 ;;
+      3) menu_deploy_vmess ;;
+      4) menu_deploy_tuic ;;
+      5) menu_deploy_anytls ;;
+      6) menu_relay_management ;;
+      7) menu_inbound_instance_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+# =========================
+# Direct Relay / 固定目标中转
+# =========================
+
+save_direct_relay_meta() {
+  local relay_tag="$1"
+  local listen_addr="$2"
+  local listen_port="$3"
+  local network="$4"
+  local target_host="$5"
+  local target_port="$6"
+  local route_outbound="$7"
+
+  ensure_inbound_meta_dir
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${relay_tag}")"
+
+  python3 - "${meta_file}"     "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}"     "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+path, tag, listen, listen_port, network, target_host, target_port, route_outbound = sys.argv[1:]
+data = {
+    "protocol": "direct-relay",
+    "tag": tag,
+    "listen": listen,
+    "listen_port": int(listen_port),
+    "network": network,
+    "target_host": target_host,
+    "target_port": int(target_port),
+    "route_outbound": route_outbound,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
+}
+
+prompt_relay_network() {
+  local choice
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 1=仅 TCP）: " choice
+
+    case "${choice:-1}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+
+list_route_outbound_candidates() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+rows = []
+seen = set()
+
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag:
+        continue
+    if tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append((tag, typ or "unknown"))
+        seen.add(tag)
+
+# 没有 direct 就补一个，保证中转机至少能 direct 出去
+if not has_direct:
+    rows.insert(0, ("direct", "direct"))
+
+for i, (tag, typ) in enumerate(rows, 1):
+    print(f"{i}\t{tag}\t{typ}")
+PY
+}
+
+get_route_outbound_by_index() {
+  local idx="$1"
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+seen = set()
+outbounds = cfg.get("outbounds", [])
+
+has_direct = False
+for ob in outbounds:
+    tag = str(ob.get("tag", "") or "")
+    typ = str(ob.get("type", "") or "")
+    if not tag or tag == "dns-out":
+        continue
+    if tag == "direct" or typ == "direct":
+        has_direct = True
+    if tag not in seen:
+        rows.append(tag)
+        seen.add(tag)
+
+if not has_direct:
+    rows.insert(0, "direct")
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+select_route_outbound_tag() {
+  require_config_file || return 1
+
+  local found=0
+  echo >&2
+  echo "可选出口：" >&2
+  echo "编号 标签                     类型" >&2
+  echo "--------------------------------------------------------" >&2
+  while IFS=$'\t' read -r idx tag typ; do
+    [ -z "${idx}" ] && continue
+    found=1
+    printf '%-4s %-24s %s\n' "${idx}" "${tag}" "${typ}" >&2
+  done < <(list_route_outbound_candidates)
+  echo "--------------------------------------------------------" >&2
+
+  if [ "${found}" -eq 0 ]; then
+    warn "未检测到现有 outbound，已自动回退到 direct" >&2
+    printf '%s\n' "direct"
+    return 0
+  fi
+
+  local idx tag
+  read -r -p "请输入出口编号 [默认: 1]: " idx
+  idx="${idx:-1}"
+
+  tag="$(get_route_outbound_by_index "${idx}")" || {
+    err "编号无效" >&2
+    return 1
+  }
+
+  printf '%s\n' "${tag}"
+}
+
+relay_fw_allowed_for_proto() {
+  local port="$1"
+  local proto="$2"
+  local backend
+
+  if ! declare -F detect_firewall_backend >/dev/null 2>&1; then
+    return 2
+  fi
+
+  backend="$(detect_firewall_backend 2>/dev/null || echo none)"
+
+  case "${backend}" in
+    ufw)
+      if ufw status 2>/dev/null | grep -Eiq "(^|[[:space:]])${port}/${proto}([[:space:]]|$).*ALLOW"; then
+        return 0
+      fi
+      return 1
+      ;;
+    firewalld)
+      if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qx "${port}/${proto}"; then
+        return 0
+      fi
+      return 1
+      ;;
+    iptables)
+      if iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+relay_fw_status_text() {
+  local port="$1"
+  local network="$2"
+
+  local tcp_rc udp_rc
+  tcp_rc=2
+  udp_rc=2
+
+  case "${network}" in
+    tcp)
+      relay_fw_allowed_for_proto "${port}" "tcp"
+      case "$?" in
+        0) printf '%s\n' "tcp 已放行" ;;
+        1) printf '%s\n' "tcp 未放行" ;;
+        *) printf '%s\n' "tcp 未知" ;;
+      esac
+      ;;
+    udp)
+      relay_fw_allowed_for_proto "${port}" "udp"
+      case "$?" in
+        0) printf '%s\n' "udp 已放行" ;;
+        1) printf '%s\n' "udp 未放行" ;;
+        *) printf '%s\n' "udp 未知" ;;
+      esac
+      ;;
+    ""|tcp+udp)
+      relay_fw_allowed_for_proto "${port}" "tcp"; tcp_rc="$?"
+      relay_fw_allowed_for_proto "${port}" "udp"; udp_rc="$?"
+
+      if [ "${tcp_rc}" = "0" ] && [ "${udp_rc}" = "0" ]; then
+        printf '%s\n' "tcp/udp 已放行"
+      elif [ "${tcp_rc}" = "1" ] && [ "${udp_rc}" = "1" ]; then
+        printf '%s\n' "tcp/udp 未放行"
+      elif [ "${tcp_rc}" = "2" ] || [ "${udp_rc}" = "2" ]; then
+        printf '%s\n' "tcp/udp 未知"
+      else
+        printf '%s\n' "tcp/udp 部分放行"
+      fi
+      ;;
+    *)
+      printf '%s\n' "未知"
+      ;;
+  esac
+}
+
+relay_status_color() {
+  case "${1:-}" in
+    *已放行*|active|running)
+      printf "%s" "${C_BGREEN:-}"
+      ;;
+    *部分放行*|*未放行*|inactive|degraded)
+      printf "%s" "${C_BYELLOW:-${C_YELLOW:-}}"
+      ;;
+    *未知*|unknown)
+      printf "%s" "${C_BCYAN:-}"
+      ;;
+    *)
+      printf "%s" "${C_RESET:-}"
+      ;;
+  esac
+}
+
+show_current_relays() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  local svc_status="unknown"
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat sing-box.service >/dev/null 2>&1; then
+    svc_status="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  local -a relay_rows=()
+  mapfile -t relay_rows < <(
+    python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+route_rules = cfg.get("route", {}).get("rules", [])
+relay_route = {}
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    outbound = r.get("outbound", "")
+    if isinstance(inbound, str):
+        relay_route[inbound] = outbound
+    elif isinstance(inbound, list):
+        for x in inbound:
+            if isinstance(x, str):
+                relay_route[x] = outbound
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+
+    tag = str(ib.get("tag", "") or "<未设置>")
+    network = str(ib.get("network", "") or "tcp+udp")
+    listen = str(ib.get("listen", "") or "<空>")
+    listen_port = str(ib.get("listen_port", "") or "<空>")
+    target_host = str(ib.get("override_address", "") or "<空>")
+    target_port = str(ib.get("override_port", "") or "<空>")
+    outbound = str(relay_route.get(str(ib.get("tag", "") or ""), "") or "<未指定>")
+
+    print("\t".join([tag, network, listen, listen_port, target_host, target_port, outbound]))
+PY
+  )
+
+  clear
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  echo "${C_BMAGENTA:-}            中转实例状态${C_RESET:-}"
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  printf "%b%-10s%b %b%s%b\n" \
+    "${C_BCYAN:-}" "服务状态 :" "${C_RESET:-}" \
+    "$(relay_status_color "${svc_status}")" "${svc_status:-unknown}" "${C_RESET:-}"
+  printf "%b%-10s%b %s\n" \
+    "${C_BCYAN:-}" "实例数量 :" "${C_RESET:-}" "${#relay_rows[@]}"
+  echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+
+  if [ "${#relay_rows[@]}" -eq 0 ]; then
+    echo "暂无中转实例"
+    echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+    pause_enter
+    return 0
+  fi
+
+  local idx=1
+  local row tag network listen listen_port target_host target_port outbound fw_status fw_color
+  for row in "${relay_rows[@]}"; do
+    IFS=$'\t' read -r tag network listen listen_port target_host target_port outbound <<< "${row}"
+    fw_status="$(relay_fw_status_text "${listen_port}" "${network}")"
+    fw_color="$(relay_status_color "${fw_status}")"
+
+    echo
+    printf "%b[%d] %s%b\n" "${C_BCYAN:-}${C_BOLD:-}" "${idx}" "${tag}" "${C_RESET:-}"
+    printf "%b%-10s%b %s:%s (%s)\n" \
+      "${C_BCYAN:-}" "监听 :" "${C_RESET:-}" \
+      "${listen}" "${listen_port}" "${network}"
+    printf "%b%-10s%b %s:%s\n" \
+      "${C_BCYAN:-}" "目标 :" "${C_RESET:-}" \
+      "${target_host}" "${target_port}"
+    printf "%b%-10s%b %s\n" \
+      "${C_BCYAN:-}" "出口 :" "${C_RESET:-}" \
+      "${outbound}"
+    printf "%b%-10s%b %b%s%b\n" \
+      "${C_BCYAN:-}" "防火墙 :" "${C_RESET:-}" \
+      "${fw_color}" "${fw_status}" "${C_RESET:-}"
+    echo "${C_DIM:-}--------------------------------------${C_RESET:-}"
+    idx=$((idx + 1))
+  done
+
+  echo "${C_BMAGENTA:-}======================================${C_RESET:-}"
+  pause_enter
+}
+
+get_direct_relay_tag_by_index() {
+  local idx="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+idx = int(sys.argv[2])
+
+rows = []
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") == "direct":
+        rows.append(str(ib.get("tag", "") or ""))
+
+if idx < 1 or idx > len(rows):
+    raise SystemExit(1)
+
+print(rows[idx - 1])
+PY
+}
+
+deploy_direct_relay() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  mkdir -p "${CONFIG_DIR}" "${BACKUP_DIR}" "${TMP_DIR}"
+  ensure_inbound_meta_dir
+
+  local relay_tag listen_addr listen_port network
+  local target_host target_port route_outbound
+  local tmp_file
+
+  relay_tag="$(prompt_default "请输入中转实例标签" "$(next_inbound_tag_by_prefix "relay")")"
+  listen_addr="$(prompt_listen_addr)"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "12345")"
+  network="$(prompt_relay_network)"
+  target_host="$(prompt_required "请输入后端目标地址（落地机 IP/域名）")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "443")"
+  route_outbound="$(select_route_outbound_tag)" || {
+    pause_enter
+    return 1
+  }
+
+  echo
+  echo "========== 中转配置预览 =========="
+  echo "实例标签       : ${relay_tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "================================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, relay_tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+relay_obj = {
+    "type": "direct",
+    "tag": relay_tag,
+    "listen": listen_addr,
+    "listen_port": int(listen_port),
+    "override_address": target_host,
+    "override_port": int(target_port)
+}
+
+if network in ("tcp", "udp"):
+    relay_obj["network"] = network
+
+replaced = False
+for i, ib in enumerate(inbounds):
+    if ib.get("tag") == relay_tag:
+        inbounds[i] = relay_obj
+        replaced = True
+        break
+
+if not replaced:
+    inbounds.append(relay_obj)
+
+# 替换同 tag 的 route 规则
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == relay_tag:
+        matched = True
+    elif isinstance(inbound, list) and relay_tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [relay_tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "写入中转配置失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${relay_tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+  
+  ok "固定目标中转部署完成"
+  echo
+  echo "------ 中转关键信息 ------"
+  echo "实例标签    : ${relay_tag}"
+  echo "监听        : ${listen_addr}:${listen_port}"
+  echo "网络        : ${network:-tcp+udp}"
+  echo "目标        : ${target_host}:${target_port}"
+  echo "出口        : ${route_outbound}"
+  echo "--------------------------"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_yes "是否一键放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+delete_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag tmp_file meta_file
+  idx="$(prompt_required "请输入要删除的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  echo "准备删除中转实例：${tag}"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.delete-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
+import json, sys
+
+cfg_path, tag = sys.argv[1], sys.argv[2]
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+
+cfg["inbounds"] = [
+    ib for ib in cfg.get("inbounds", [])
+    if not (ib.get("type") == "direct" and str(ib.get("tag", "") or "") == tag)
+]
+
+route = cfg.setdefault("route", {})
+new_rules = []
+for r in route.get("rules", []):
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+    if not matched:
+        new_rules.append(r)
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "删除中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+
+  ok "已删除中转实例：${tag}"
+  pause_enter
+}
+
+get_direct_relay_detail_by_tag() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+tag = sys.argv[2]
+
+route_rules = cfg.get("route", {}).get("rules", [])
+route_outbound = ""
+
+for r in route_rules:
+    inbound = r.get("inbound")
+    matched = False
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if matched:
+        route_outbound = str(r.get("outbound", "") or "")
+        break
+
+for ib in cfg.get("inbounds", []):
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    print(str(ib.get("listen", "") or "::"))
+    print(str(ib.get("listen_port", "") or "12345"))
+    print(str(ib.get("network", "") or "tcp+udp"))
+    print(str(ib.get("override_address", "") or ""))
+    print(str(ib.get("override_port", "") or "443"))
+    print(route_outbound)
+    raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+prompt_relay_network_default() {
+  local default_net="$1"
+  local choice default_choice
+
+  case "${default_net}" in
+    tcp) default_choice="1" ;;
+    udp) default_choice="2" ;;
+    both|tcp+udp|"") default_choice="3" ;;
+    *) default_choice="1" ;;
+  esac
+
+  while true; do
+    echo >&2
+    echo "请选择中转网络类型：" >&2
+    echo "1. 仅 TCP   （适合网站、TLS、Reality、VMess WS 等）" >&2
+    echo "2. 仅 UDP   （适合 Hysteria2、TUIC、部分游戏/语音）" >&2
+    echo "3. TCP+UDP  （同时放行两种流量，通用但更宽）" >&2
+    read -r -p "请选择 [1-3]（默认 ${default_choice}）: " choice
+
+    case "${choice:-$default_choice}" in
+      1)
+        printf '%s\n' "tcp"
+        return 0
+        ;;
+      2)
+        printf '%s\n' "udp"
+        return 0
+        ;;
+      3)
+        printf '%s\n' "both"
+        return 0
+        ;;
+      *)
+        echo "无效选项：只能输入 1 / 2 / 3" >&2
+        ;;
+    esac
+  done
+}
+
+edit_direct_relay_instance() {
+  need_root
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_current_relays
+  echo
+
+  local idx tag
+  local cur_listen cur_port cur_network cur_target_host cur_target_port cur_outbound
+  local listen_addr listen_port network target_host target_port route_outbound
+  local tmp_file
+
+  idx="$(prompt_required "请输入要修改的中转编号")"
+  tag="$(get_direct_relay_tag_by_index "${idx}")" || {
+    err "编号无效"
+    pause_enter
+    return 1
+  }
+
+  mapfile -t _relay_detail < <(get_direct_relay_detail_by_tag "${tag}") || {
+    err "读取中转实例详情失败"
+    pause_enter
+    return 1
+  }
+
+  cur_listen="${_relay_detail[0]:-::}"
+  cur_port="${_relay_detail[1]:-12345}"
+  cur_network="${_relay_detail[2]:-tcp+udp}"
+  cur_target_host="${_relay_detail[3]:-}"
+  cur_target_port="${_relay_detail[4]:-443}"
+  cur_outbound="${_relay_detail[5]:-direct}"
+
+  echo "当前实例标签：${tag}"
+  echo
+
+  listen_addr="$(prompt_default "请输入监听地址" "${cur_listen}")"
+  listen_port="$(prompt_port_default "请输入中转监听端口" "${cur_port}")"
+  network="$(prompt_relay_network_default "${cur_network}")"
+  target_host="$(prompt_default "请输入后端目标地址（落地机 IP/域名）" "${cur_target_host}")"
+  target_port="$(prompt_port_default "请输入后端目标端口" "${cur_target_port}")"
+
+  echo
+  echo "当前出口标签：${cur_outbound}"
+  if confirm_default_no "是否重新选择出口标签？"; then
+    route_outbound="$(select_route_outbound_tag)" || {
+      pause_enter
+      return 1
+    }
+  else
+    route_outbound="${cur_outbound}"
+  fi
+
+  echo
+  echo "========== 修改预览 =========="
+  echo "实例标签       : ${tag}"
+  echo "监听地址       : ${listen_addr}"
+  echo "监听端口       : ${listen_port}"
+  local network_text="${network}"
+  [ "${network_text}" = "both" ] && network_text="tcp+udp"
+  echo "网络类型       : ${network_text}"
+  echo "后端目标       : ${target_host}:${target_port}"
+  echo "出口标签       : ${route_outbound}"
+  echo "============================="
+  echo
+
+  if ! confirm_default_yes "确认写入并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  tmp_file="${TMP_DIR}/config.edit-direct-relay.json"
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
+
+  if ! python3 - "${tmp_file}" \
+    "${tag}" "${listen_addr}" "${listen_port}" "${network}" \
+    "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+
+(
+    cfg_path, tag, listen_addr, listen_port, network,
+    target_host, target_port, route_outbound
+) = sys.argv[1:]
+
+cfg = json.load(open(cfg_path, 'r', encoding='utf-8'))
+inbounds = cfg.setdefault("inbounds", [])
+outbounds = cfg.setdefault("outbounds", [])
+route = cfg.setdefault("route", {})
+rules = route.setdefault("rules", [])
+
+# 如果要走 direct，但当前配置里没有 direct outbound，就自动补一个
+has_direct = False
+for ob in outbounds:
+    if str(ob.get("tag", "") or "") == "direct" or str(ob.get("type", "") or "") == "direct":
+        has_direct = True
+        break
+
+if route_outbound == "direct" and not has_direct:
+    outbounds.insert(0, {
+        "type": "direct",
+        "tag": "direct"
+    })
+
+updated = False
+for ib in inbounds:
+    if ib.get("type") != "direct":
+        continue
+    if str(ib.get("tag", "") or "") != tag:
+        continue
+
+    ib["listen"] = listen_addr
+    ib["listen_port"] = int(listen_port)
+    ib["override_address"] = target_host
+    ib["override_port"] = int(target_port)
+
+    if network in ("tcp", "udp"):
+        ib["network"] = network
+    else:
+        ib.pop("network", None)
+
+    updated = True
+    break
+
+if not updated:
+    raise SystemExit(1)
+
+new_rules = []
+for r in rules:
+    inbound = r.get("inbound")
+    matched = False
+
+    if isinstance(inbound, str) and inbound == tag:
+        matched = True
+    elif isinstance(inbound, list) and tag in inbound:
+        matched = True
+
+    if not matched:
+        new_rules.append(r)
+
+new_rules.insert(0, {
+    "inbound": [tag],
+    "action": "route",
+    "outbound": route_outbound
+})
+
+route["rules"] = new_rules
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "修改中转实例失败"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_file}"; then
+    err "配置校验失败，未覆盖正式配置"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_file}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    pause_enter
+    return 1
+  fi
+
+  local meta_network="${network}"
+  [ "${meta_network}" = "both" ] && meta_network="tcp+udp"
+
+  save_direct_relay_meta \
+    "${tag}" "${listen_addr}" "${listen_port}" "${meta_network}" \
+    "${target_host}" "${target_port}" "${route_outbound}"
+    
+  ok "已修改中转实例：${tag}"
+  echo
+
+  if declare -F detect_firewall_backend >/dev/null 2>&1 && declare -F fw_open_port >/dev/null 2>&1; then
+    local backend
+    backend="$(detect_firewall_backend)"
+    if [ "${backend}" != "none" ]; then
+      if [ -z "${network}" ] || [ "${network}" = "tcp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/tcp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "tcp"; then
+            ok "已放行 ${listen_port}/tcp"
+          else
+            err "放行 ${listen_port}/tcp 失败"
+          fi
+        fi
+      fi
+
+      if [ -z "${network}" ] || [ "${network}" = "udp" ]; then
+        if confirm_default_no "是否再次尝试放行 ${listen_port}/udp 到防火墙？"; then
+          if fw_open_port "${backend}" "${listen_port}" "udp"; then
+            ok "已放行 ${listen_port}/udp"
+          else
+            err "放行 ${listen_port}/udp 失败"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  pause_enter
+}
+
+menu_singbox_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "         Sing-box 固定目标中转"
+    echo "======================================"
+    echo "1. 新建固定目标中转"
+    echo "2. 查看当前中转实例"
+    echo "3. 修改指定中转实例"
+    echo "4. 删除指定中转实例"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1) deploy_direct_relay ;;
+      2) show_current_relays ;;
+      3) edit_direct_relay_instance ;;
+      4) delete_direct_relay_instance ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_relay_management() {
+  while true; do
+    clear
+    echo "======================================"
+    echo "              中转管理"
+    echo "======================================"
+    echo "1. Sing-box 固定目标中转"
+    echo "2. Realm 中转"
+    echo "0. 返回"
+    echo
+
+    read -r -p "请选择 [0-2]: " choice
+    case "${choice:-}" in
+      1) menu_singbox_relay_management ;;
+      2) menu_realm_relay_management ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+\t' read -r proto detail <<<"${conflict}"
+    err "端口 ${port}/${proto} 已被系统进程占用" >&2
+    [ -n "${detail}" ] && echo "占用信息：${detail}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+prompt_available_port() {
+  local prompt="$1"
+  local default_port="$2"
+  local network="$3"
+  local exclude_tag="${4:-}"
+  local port
+
+  while true; do
+    port="$(prompt_port_default "${prompt}" "${default_port}")"
+    if check_port_available "${port}" "${network}" "${exclude_tag}"; then
+      printf '%s\n' "${port}"
+      return 0
+    fi
+    echo "请更换端口。" >&2
+  done
+}
+
+inbound_port_is_listening() {
+  local network="$1"
+  local port="$2"
+  local output
+
+  [ -n "${port}" ] || return 1
+  has_cmd ss || return 2
+
+  if [ "${network}" = "udp" ]; then
+    output="$(ss -H -lnu 2>/dev/null || true)"
+  else
+    output="$(ss -H -lnt 2>/dev/null || true)"
+  fi
+
+  printf '%s\n' "${output}" | grep -Eq ":${port}([[:space:]]|$)"
+}
+
 restart_singbox_service() {
   restart_singbox_service_safe
 }
@@ -2030,7 +12533,7 @@ deploy_anytls_tls() {
 
   tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
   listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
-  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
@@ -2161,7 +12664,7 @@ deploy_anytls_reality() {
 
   tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
   listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
-  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
