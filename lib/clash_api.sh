@@ -310,7 +310,7 @@ show_clash_api_status() {
   echo "UI 下载出口       : ${CLASH_API_UI_DETOUR:-默认出口}"
 
   if [ -n "${CLASH_API_SECRET}" ]; then
-    echo "API Secret        : ${CLASH_API_SECRET}"
+    echo "API Secret        : $(mask_secret "${CLASH_API_SECRET}")"
   else
     echo "API Secret        : 未设置"
   fi
