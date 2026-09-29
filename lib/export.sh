@@ -578,6 +578,131 @@ print(json.dumps(obj, ensure_ascii=False, indent=2))
 PY
 }
 
+require_inbound_meta_by_tag() {
+  local tag="$1"
+  local meta_file
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  if [ ! -f "${meta_file}" ]; then
+    err "实例 ${tag} 缺少客户端元数据，无法生成完整客户端配置"
+    return 1
+  fi
+
+  printf '%s\n' "${meta_file}"
+}
+
+export_vless_bundle_by_tag() {
+  local tag="$1"
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+  require_python3 || {
+    pause_enter
+    return 1
+  }
+
+  local meta_file user_idx user_line user_name user_uuid uri json_text
+  meta_file="$(require_inbound_meta_by_tag "${tag}")" || {
+    pause_enter
+    return 1
+  }
+
+  clear
+  echo "======================================"
+  echo "            VLESS 客户端配置"
+  echo "======================================"
+  echo "实例：${tag}"
+  echo
+  echo "当前用户列表："
+
+  local found=0
+  while IFS=$'\t' read -r n name uuid; do
+    [ -z "${n}" ] && continue
+    found=1
+    printf '%-4s %-18s %s\n' "$n" "$name" "$uuid"
+  done < <(list_vless_user_rows_by_tag "${tag}")
+
+  if [ "${found}" -eq 0 ]; then
+    warn "该实例没有可导出的用户"
+    pause_enter
+    return 1
+  fi
+
+  echo
+  user_idx="$(prompt_default "请输入要导出的用户编号" "1")"
+  user_line="$(get_vless_user_by_index_in_tag "${tag}" "${user_idx}")" || {
+    err "读取用户失败"
+    pause_enter
+    return 1
+  }
+
+  user_name="${user_line%%|*}"
+  user_uuid="${user_line##*|}"
+
+  uri="$(build_vless_uri_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+  json_text="$(build_vless_singbox_json_from_meta "${meta_file}" "${user_name}" "${user_uuid}" 2>/dev/null || true)"
+
+  show_uri_and_qr "VLESS URI" "${uri}"
+  show_json_block "VLESS sing-box JSON" "${json_text}"
+  pause_enter
+}
+
+export_inbound_instance_by_tag() {
+  local tag="$1"
+  local typ="$2"
+  local meta_file uri json_text
+
+  if [ "${typ}" = "vless" ]; then
+    export_vless_bundle_by_tag "${tag}"
+    return $?
+  fi
+
+  meta_file="$(require_inbound_meta_by_tag "${tag}")" || {
+    pause_enter
+    return 1
+  }
+
+  clear
+  echo "======================================"
+  echo "            导出客户端配置"
+  echo "======================================"
+  echo "实例：${tag}"
+  echo
+
+  case "${typ}" in
+    hysteria2)
+      uri="$(build_hy2_uri "${meta_file}" 2>/dev/null || true)"
+      json_text="$(build_hy2_singbox_json "${meta_file}" 2>/dev/null || true)"
+      show_uri_and_qr "Hysteria2 URI" "${uri}"
+      show_json_block "Hysteria2 sing-box JSON" "${json_text}"
+      ;;
+    vmess)
+      uri="$(build_vmess_uri "${meta_file}" 2>/dev/null || true)"
+      json_text="$(build_vmess_singbox_json "${meta_file}" 2>/dev/null || true)"
+      show_uri_and_qr "VMess URI" "${uri}"
+      show_json_block "VMess sing-box JSON" "${json_text}"
+      ;;
+    tuic)
+      uri="$(build_tuic_uri "${meta_file}" 2>/dev/null || true)"
+      json_text="$(build_tuic_singbox_json "${meta_file}" 2>/dev/null || true)"
+      show_uri_and_qr "TUIC URI" "${uri}"
+      show_json_block "TUIC sing-box JSON" "${json_text}"
+      ;;
+    anytls)
+      json_text="$(build_anytls_singbox_json_from_meta "${meta_file}" 2>/dev/null || true)"
+      show_json_block "AnyTLS sing-box JSON" "${json_text}"
+      ;;
+    *)
+      err "当前实例类型暂不支持导出：${typ}"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  pause_enter
+}
+
 export_vless_bundle() {
   require_config_file || {
     pause_enter

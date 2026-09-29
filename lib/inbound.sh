@@ -510,56 +510,191 @@ print(f"{prefix}-{n:03d}")
 PY
 }
 
+managed_inbound_rows() {
+  python3 - "${CONFIG_DIR}/config.json" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+
+def label_for(ib):
+    typ = str(ib.get("type", "") or "")
+    tls = ib.get("tls", {}) or {}
+    if typ == "vless":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        if reality:
+            return "VLESS Reality"
+        if tls.get("enabled"):
+            return "VLESS TLS"
+        return "VLESS"
+    if typ == "hysteria2":
+        return "Hysteria2"
+    if typ == "vmess":
+        return "VMess TLS" if tls.get("enabled") else "VMess"
+    if typ == "tuic":
+        return "TUIC"
+    if typ == "anytls":
+        reality = (tls.get("reality", {}) or {}).get("enabled") is True
+        return "AnyTLS Reality" if reality else "AnyTLS"
+    return typ or "<未知>"
+
+n = 0
+for ib in cfg.get("inbounds", []):
+    typ = str(ib.get("type", "") or "")
+    tag = str(ib.get("tag", "") or "")
+    if typ not in supported or not tag:
+        continue
+
+    n += 1
+    listen = str(ib.get("listen", "") or "")
+    port = str(ib.get("listen_port", "") or "")
+    if ":" in listen and not listen.startswith("["):
+        endpoint = f"[{listen}]:{port}" if port else f"[{listen}]"
+    else:
+        endpoint = f"{listen}:{port}" if port else (listen or "<空>")
+
+    users = ib.get("users", [])
+    user_count = len(users) if isinstance(users, list) else 0
+    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{user_count}")
+PY
+}
+
+managed_inbound_count() {
+  managed_inbound_rows | wc -l | tr -d ' '
+}
+
+show_managed_inbound_list() {
+  local service_state="inactive"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+
+  echo "当前入站实例："
+  echo "编号 标签                     类型              监听地址                 用户"
+  echo "--------------------------------------------------------------------------------"
+
+  local found=0
+  while IFS=$'\t' read -r n tag _type label endpoint users; do
+    [ -z "${n}" ] && continue
+    found=1
+    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${users}"
+  done < <(managed_inbound_rows)
+
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无 SBM 管理的入站实例>"
+  fi
+
+  echo "--------------------------------------------------------------------------------"
+  echo "sing-box 服务：${service_state:-unknown}"
+}
+
 show_current_inbounds() {
   require_config_file || {
     pause_enter
     return 1
   }
 
-  python3 - "${CONFIG_DIR}/config.json" <<'PY'
-import json, sys
-
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-inbounds = cfg.get("inbounds", [])
-
-print("当前入站实例：")
-print("编号 标签                     类型         监听地址")
-print("----------------------------------------------------------------")
-
-idx = 1
-for ib in inbounds:
-    tag = ib.get("tag", "") or "<未设置>"
-    typ = ib.get("type", "")
-    listen = ib.get("listen", "")
-    port = ib.get("listen_port", "")
-    endpoint = f"{listen}:{port}" if listen and port else f"{listen or '<空>'}:{port or '<空>'}"
-    print(f"{idx:<4} {tag:<24} {typ:<12} {endpoint}")
-    idx += 1
-
-if idx == 1:
-    print("<暂无入站实例>")
-
-print("----------------------------------------------------------------")
-PY
-
+  show_managed_inbound_list
   pause_enter
 }
 
-get_inbound_tag_by_index() {
+get_managed_inbound_field_by_index() {
   local idx="$1"
+  local field="$2"
 
-  python3 - "${CONFIG_DIR}/config.json" "${idx}" <<'PY'
+  python3 - "${CONFIG_DIR}/config.json" "${idx}" "${field}" <<'PY'
 import json, sys
 
-cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 idx = int(sys.argv[2])
-inbounds = cfg.get("inbounds", [])
+field = sys.argv[3]
+supported = {"vless", "hysteria2", "vmess", "tuic", "anytls"}
+rows = [
+    ib for ib in cfg.get("inbounds", [])
+    if str(ib.get("type", "") or "") in supported and str(ib.get("tag", "") or "")
+]
 
-if idx < 1 or idx > len(inbounds):
+if idx < 1 or idx > len(rows):
     raise SystemExit(1)
 
-print(inbounds[idx - 1].get("tag", "") or "")
+ib = rows[idx - 1]
+if field == "tag":
+    print(str(ib.get("tag", "") or ""))
+elif field == "type":
+    print(str(ib.get("type", "") or ""))
+else:
+    raise SystemExit(1)
 PY
+}
+
+get_inbound_tag_by_index() {
+  get_managed_inbound_field_by_index "$1" "tag"
+}
+
+show_inbound_instance_detail() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tag = sys.argv[2]
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit(1)
+
+typ = str(ib.get("type", "") or "")
+listen = str(ib.get("listen", "") or "")
+port = str(ib.get("listen_port", "") or "")
+endpoint = f"[{listen}]:{port}" if ":" in listen and not listen.startswith("[") else f"{listen}:{port}"
+
+tls = ib.get("tls", {}) or {}
+reality = (tls.get("reality", {}) or {}).get("enabled") is True
+if typ == "vless":
+    label = "VLESS Reality" if reality else ("VLESS TLS" if tls.get("enabled") else "VLESS")
+elif typ == "hysteria2":
+    label = "Hysteria2"
+elif typ == "vmess":
+    label = "VMess TLS" if tls.get("enabled") else "VMess"
+elif typ == "tuic":
+    label = "TUIC"
+elif typ == "anytls":
+    label = "AnyTLS Reality" if reality else "AnyTLS"
+else:
+    label = typ
+
+users = ib.get("users", [])
+user_count = len(users) if isinstance(users, list) else 0
+server_name = str(tls.get("server_name", "") or "")
+network = str(ib.get("network", "") or "")
+transport = ib.get("transport", {}) or {}
+transport_type = str(transport.get("type", "") or "")
+
+print(f"实例标签 : {tag}")
+print(f"协议类型 : {label}")
+print(f"监听地址 : {endpoint}")
+print(f"用户数量 : {user_count}")
+if network:
+    print(f"网络类型 : {network}")
+if transport_type:
+    print(f"传输方式 : {transport_type}")
+if server_name:
+    print(f"SNI      : {server_name}")
+PY
+
+  local meta_file
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  if [ -f "${meta_file}" ]; then
+    echo "客户端信息: 已保存"
+  else
+    echo "客户端信息: 缺少元数据"
+  fi
+
+  local service_state="unknown"
+  if command -v systemctl >/dev/null 2>&1; then
+    service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
+  fi
+  echo "服务状态 : ${service_state}"
 }
 
 delete_legacy_inbound_meta_by_tag() {
@@ -585,50 +720,44 @@ delete_legacy_inbound_meta_by_tag() {
   esac
 }
 
-delete_inbound_instance() {
+delete_inbound_instance_by_tag() {
+  local tag="$1"
   need_root
-  require_config_file || {
+  require_config_file || return 1
+  ensure_inbound_meta_dir
+
+  echo "准备删除入站实例：${tag}"
+  show_inbound_instance_detail "${tag}" || {
+    err "未找到入站实例：${tag}"
     pause_enter
     return 1
   }
-
-  ensure_inbound_meta_dir
-
-  show_current_inbounds
   echo
 
-  local idx tmp_file tag meta_file
-  idx="$(prompt_required "请输入要删除的入站编号")"
-
-  # 先取 tag，仅用于删元数据；允许为空
-  tag="$(get_inbound_tag_by_index "${idx}" 2>/dev/null || true)"
-
-  echo "准备删除入站实例：${tag:-<未设置>}"
-  if ! confirm_default_no "确认继续吗？"; then
+  if ! confirm_default_no "确认删除该实例吗？"; then
     warn "已取消"
     pause_enter
     return 0
   fi
 
+  local tmp_file meta_file
   tmp_file="${TMP_DIR}/config.delete-inbound.json"
   cp -f "${CONFIG_DIR}/config.json" "${tmp_file}"
 
-  if ! python3 - "${tmp_file}" "${idx}" <<'PY'
+  if ! python3 - "${tmp_file}" "${tag}" <<'PY'
 import json, sys
 
-path_cfg = sys.argv[1]
-idx = int(sys.argv[2])
-
-cfg = json.load(open(path_cfg, 'r', encoding='utf-8'))
+path_cfg, tag = sys.argv[1:]
+cfg = json.load(open(path_cfg, "r", encoding="utf-8"))
 inbounds = cfg.get("inbounds", [])
 
-if idx < 1 or idx > len(inbounds):
+before = len(inbounds)
+inbounds = [ib for ib in inbounds if str(ib.get("tag", "") or "") != tag]
+if len(inbounds) == before:
     raise SystemExit(1)
 
-del inbounds[idx - 1]
 cfg["inbounds"] = inbounds
-
-with open(path_cfg, 'w', encoding='utf-8') as f:
+with open(path_cfg, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 PY
   then
@@ -646,20 +775,140 @@ PY
   activate_config_file "${tmp_file}"
 
   if ! restart_singbox_service; then
-    err "服务重启失败，可执行 journalctl -u sing-box -n 100 --no-pager 查看日志"
+    err "服务重启失败；如存在上一份配置，已尝试自动回滚"
     pause_enter
     return 1
   fi
 
-  if [ -n "${tag:-}" ]; then
-    meta_file="$(inbound_meta_file_by_tag "${tag}")"
-    rm -f "${meta_file}"
-    delete_legacy_inbound_meta_by_tag "${tag}"
-  fi
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  rm -f "${meta_file}"
+  delete_legacy_inbound_meta_by_tag "${tag}"
 
-  ok "已删除入站实例：${tag:-<未设置>}"
+  ok "已删除入站实例：${tag}"
   pause_enter
 }
+
+delete_inbound_instance() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  show_managed_inbound_list
+  echo
+
+  local idx tag
+  idx="$(prompt_required "请输入要删除的入站编号")"
+  tag="$(get_managed_inbound_field_by_index "${idx}" "tag" 2>/dev/null || true)"
+  if [ -z "${tag}" ]; then
+    err "入站编号无效"
+    pause_enter
+    return 1
+  fi
+
+  delete_inbound_instance_by_tag "${tag}"
+}
+
+menu_inbound_instance_detail() {
+  local tag="$1"
+  local typ="$2"
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_inbound_instance_detail "${tag}" || {
+      err "实例已不存在：${tag}"
+      pause_enter
+      return
+    }
+    echo "--------------------------------------"
+    echo "1. 查看详情"
+    echo "2. 导出客户端配置"
+    if [ "${typ}" = "vless" ]; then
+      echo "3. 用户管理"
+    else
+      echo "3. 用户管理（仅 VLESS）"
+    fi
+    echo "4. 删除实例"
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择 [0-4]: " choice
+    case "${choice:-}" in
+      1)
+        clear
+        echo "======================================"
+        echo "              实例详情"
+        echo "======================================"
+        show_inbound_instance_detail "${tag}"
+        pause_enter
+        ;;
+      2)
+        export_inbound_instance_by_tag "${tag}" "${typ}"
+        ;;
+      3)
+        if [ "${typ}" = "vless" ]; then
+          menu_vless_user_management_for_tag "${tag}"
+        else
+          warn "当前协议暂不支持独立用户管理"
+          pause_enter
+        fi
+        ;;
+      4)
+        delete_inbound_instance_by_tag "${tag}"
+        return
+        ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
+menu_inbound_instance_management() {
+  require_config_file || {
+    pause_enter
+    return 1
+  }
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "            入站实例管理"
+    echo "======================================"
+    show_managed_inbound_list
+    echo
+    echo "a. 导出全部 URI"
+    echo "0. 返回"
+    echo
+
+    local choice tag typ
+    read -r -p "请选择实例编号 / a / 0: " choice
+    case "${choice:-}" in
+      0) return ;;
+      a|A)
+        export_all_uris
+        ;;
+      ''|*[!0-9]*)
+        echo "无效选项"
+        sleep 1
+        ;;
+      *)
+        tag="$(get_managed_inbound_field_by_index "${choice}" "tag" 2>/dev/null || true)"
+        typ="$(get_managed_inbound_field_by_index "${choice}" "type" 2>/dev/null || true)"
+        if [ -z "${tag}" ] || [ -z "${typ}" ]; then
+          err "实例编号无效"
+          sleep 1
+          continue
+        fi
+        menu_inbound_instance_detail "${tag}" "${typ}"
+        ;;
+    esac
+  done
+}
+
 
 save_hy2_meta() {
   local hy2_tag="$1"
@@ -2325,14 +2574,11 @@ menu_inbound_management() {
     echo "4. 部署/重装 TUIC"
     echo "5. 部署/重装 AnyTLS"
     echo "6. 中转管理"
-    echo "7. 查看当前入站实例"
-    echo "8. 删除指定入站实例"
-    echo "9. 导出客户端配置"
-    echo "10. VLESS 用户管理"
+    echo "7. 入站实例管理"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-10]: " choice
+    read -r -p "请选择 [0-7]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless ;;
       2) menu_deploy_hysteria2 ;;
@@ -2340,10 +2586,7 @@ menu_inbound_management() {
       4) menu_deploy_tuic ;;
       5) menu_deploy_anytls ;;
       6) menu_relay_management ;;
-      7) show_current_inbounds ;;
-      8) delete_inbound_instance ;;
-      9) menu_export_client ;;
-      10) menu_user_management ;;
+      7) menu_inbound_instance_management ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac

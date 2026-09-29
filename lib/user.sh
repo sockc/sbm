@@ -78,20 +78,32 @@ raise SystemExit(1)
 PY
 }
 
-show_vless_users() {
+show_vless_users_for_tag() {
+  local tag="$1"
   require_user_manage_env || return 1
-
-  local tag
-  tag="$(select_vless_instance "请输入要查看的 VLESS 实例编号")" || return 1
 
   echo
   echo "实例：${tag}"
   echo "编号 用户备注               UUID"
   echo "--------------------------------------------------------"
-  show_vless_users_by_tag "${tag}" | while IFS=$'\t' read -r n name uuid; do
+  local found=0
+  while IFS=$'\t' read -r n name uuid; do
+    [ -z "${n}" ] && continue
+    found=1
     printf '%-4s %-22s %s\n' "${n}" "${name}" "${uuid}"
-  done
+  done < <(show_vless_users_by_tag "${tag}")
+  if [ "${found}" -eq 0 ]; then
+    echo "<暂无用户>"
+  fi
   echo "--------------------------------------------------------"
+}
+
+show_vless_users() {
+  require_user_manage_env || return 1
+
+  local tag
+  tag="$(select_vless_instance "请输入要查看的 VLESS 实例编号")" || return 1
+  show_vless_users_for_tag "${tag}"
 }
 
 default_next_user_name_for_tag() {
@@ -108,15 +120,11 @@ raise SystemExit(1)
 PY
 }
 
-add_vless_user() {
+add_vless_user_for_tag() {
+  local tag="$1"
   require_user_manage_env || return 1
 
-  local tag user_name user_uuid tmp_file
-  tag="$(select_vless_instance "请输入要新增用户的 VLESS 实例编号")" || {
-    pause_enter
-    return 1
-  }
-
+  local user_name user_uuid tmp_file
   user_name="$(prompt_default "请输入用户备注" "$(default_next_user_name_for_tag "${tag}")")"
   user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
   tmp_file="${TMP_DIR}/config.add-user.json"
@@ -173,24 +181,27 @@ PY
   pause_enter
 }
 
-delete_vless_user() {
+add_vless_user() {
   require_user_manage_env || return 1
 
-  local tag idx tmp_file
-  tag="$(select_vless_instance "请输入要删除用户的 VLESS 实例编号")" || {
+  local tag
+  tag="$(select_vless_instance "请输入要新增用户的 VLESS 实例编号")" || {
     pause_enter
     return 1
   }
 
-  echo
-  echo "实例：${tag}"
-  echo "编号 用户备注               UUID"
-  echo "--------------------------------------------------------"
-  show_vless_users_by_tag "${tag}" | while IFS=$'\t' read -r n name uuid; do
-    printf '%-4s %-22s %s\n' "${n}" "${name}" "${uuid}"
-  done
-  echo "--------------------------------------------------------"
+  add_vless_user_for_tag "${tag}"
+}
 
+delete_vless_user_for_tag() {
+  local tag="$1"
+  require_user_manage_env || return 1
+
+  echo
+  show_vless_users_for_tag "${tag}"
+  echo
+
+  local idx tmp_file
   idx="$(prompt_required "请输入要删除的用户编号")"
   if ! confirm_default_no "确认删除该用户吗？"; then
     warn "已取消"
@@ -241,6 +252,48 @@ PY
 
   ok "用户删除成功（实例 ${tag}）"
   pause_enter
+}
+
+delete_vless_user() {
+  require_user_manage_env || return 1
+
+  local tag
+  tag="$(select_vless_instance "请输入要删除用户的 VLESS 实例编号")" || {
+    pause_enter
+    return 1
+  }
+
+  delete_vless_user_for_tag "${tag}"
+}
+
+menu_vless_user_management_for_tag() {
+  local tag="$1"
+
+  while true; do
+    clear
+    echo "======================================"
+    echo "          VLESS 用户管理"
+    echo "======================================"
+    echo "实例：${tag}"
+    echo
+    show_vless_users_for_tag "${tag}"
+    echo
+    echo "1. 新增用户"
+    echo "2. 删除用户"
+    echo "3. 刷新用户列表"
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择 [0-3]: " choice
+    case "${choice:-}" in
+      1) add_vless_user_for_tag "${tag}" ;;
+      2) delete_vless_user_for_tag "${tag}" ;;
+      3) ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
 }
 
 menu_user_management() {
