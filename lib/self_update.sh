@@ -16,39 +16,56 @@ get_install_source() {
 
 fetch_text() {
   local url="$1"
+  local tmp
+
+  tmp="$(mktemp "${TMP_DIR:-/tmp}/sbm-fetch.XXXXXX")" || return 1
+
+  cleanup_fetch_tmp() {
+    rm -f -- "${tmp}" 2>/dev/null || true
+  }
 
   if has_cmd curl; then
-    # 先尝试完全绕过当前 shell 代理环境，避免被 127.0.0.1:7890 之类的失效代理拖死
+    # 每次尝试都写入独立临时文件；失败响应不会污染下一次重试的输出。
     if env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
           -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
-          curl --noproxy '*' -fsSL "$url"; then
+          curl --noproxy '*' --retry 1 --connect-timeout 10 -fsSL "$url" -o "${tmp}"; then
+      cat "${tmp}"
+      cleanup_fetch_tmp
       return 0
     fi
 
-    # 直连失败时，再回退到当前环境（适配某些必须走代理的机器）
-    if curl -fsSL "$url"; then
+    : > "${tmp}"
+    if curl --retry 2 --connect-timeout 15 -fsSL "$url" -o "${tmp}"; then
+      cat "${tmp}"
+      cleanup_fetch_tmp
       return 0
     fi
 
+    cleanup_fetch_tmp
     return 1
   fi
 
   if has_cmd wget; then
-    # 先尝试禁用代理
     if env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
           -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
-          wget -e use_proxy=no -qO- "$url"; then
+          wget -e use_proxy=no -T 15 -qO "${tmp}" "$url"; then
+      cat "${tmp}"
+      cleanup_fetch_tmp
       return 0
     fi
 
-    # 再回退到当前环境
-    if wget -qO- "$url"; then
+    : > "${tmp}"
+    if wget -T 20 -qO "${tmp}" "$url"; then
+      cat "${tmp}"
+      cleanup_fetch_tmp
       return 0
     fi
 
+    cleanup_fetch_tmp
     return 1
   fi
 
+  cleanup_fetch_tmp
   err "未找到 curl 或 wget"
   return 1
 }
@@ -56,22 +73,54 @@ fetch_text() {
 get_remote_commit_sha() {
   get_install_source
 
+  local sha=""
+  local git_url="https://github.com/${SBM_REPO_LOCAL}.git"
+
+  # 优先使用 git ls-remote，避免把脚本更新强绑定到 api.github.com。
+  if has_cmd git; then
+    sha="$(
+      env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+          git ls-remote "${git_url}" "refs/heads/${SBM_BRANCH_LOCAL}" 2>/dev/null \
+        | awk 'NR==1 {print $1}'
+    )"
+    if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      printf '%s\n' "${sha,,}"
+      return 0
+    fi
+
+    sha="$(
+      git ls-remote "${git_url}" "refs/heads/${SBM_BRANCH_LOCAL}" 2>/dev/null \
+        | awk 'NR==1 {print $1}'
+    )"
+    if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      printf '%s\n' "${sha,,}"
+      return 0
+    fi
+  fi
+
   local url json
   url="https://api.github.com/repos/${SBM_REPO_LOCAL}/commits/${SBM_BRANCH_LOCAL}"
   json="$(fetch_text "${url}" 2>/dev/null)" || return 1
 
   if has_cmd python3; then
-    REMOTE_COMMIT_JSON="${json}" python3 - <<'PY'
+    sha="$(
+      REMOTE_COMMIT_JSON="${json}" python3 - <<'PY'
 import json, os
 data = json.loads(os.environ["REMOTE_COMMIT_JSON"])
-sha = str(data.get("sha", "") or "")
-if len(sha) < 40:
-    raise SystemExit(1)
-print(sha)
+print(str(data.get("sha", "") or ""))
 PY
+    )"
   else
-    printf '%s\n' "${json}" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n1
+    sha="$(printf '%s\n' "${json}" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' | head -n1)"
   fi
+
+  if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf '%s\n' "${sha,,}"
+    return 0
+  fi
+
+  return 1
 }
 
 get_remote_sbm_version() {
@@ -120,21 +169,27 @@ run_self_update() {
   mkdir -p "${TMP_DIR}"
   get_install_source
 
-  local tmp_installer url remote_sha
+  local tmp_installer url remote_sha update_ref
   remote_sha="$(get_remote_commit_sha 2>/dev/null || true)"
-  if [ -z "${remote_sha}" ]; then
-    err "无法解析远端分支对应的固定 commit，已停止更新"
-    pause_enter
-    return 1
+  if [ -n "${remote_sha}" ]; then
+    update_ref="${remote_sha}"
+  else
+    update_ref="${SBM_BRANCH_LOCAL}"
+    warn "无法解析远端固定 commit，将回退到分支 ${SBM_BRANCH_LOCAL} 更新"
+    warn "安装器仍会先完整下载并校验，再切换现有版本"
   fi
 
-  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${remote_sha}/install.sh"
+  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${update_ref}/install.sh"
   tmp_installer="${TMP_DIR}/sbm-install.sh"
 
   echo "准备从以下来源更新脚本："
   echo "仓库: ${SBM_REPO_LOCAL}"
   echo "分支: ${SBM_BRANCH_LOCAL}"
-  echo "固定提交: ${remote_sha}"
+  if [ -n "${remote_sha}" ]; then
+    echo "固定提交: ${remote_sha}"
+  else
+    echo "更新来源: ${SBM_BRANCH_LOCAL}（commit 解析失败，使用兼容模式）"
+  fi
   echo
 
   if ! confirm_default_yes "确认执行脚本自更新吗？"; then
@@ -161,7 +216,7 @@ run_self_update() {
     return 1
   fi
 
-  if REPO="${SBM_REPO_LOCAL}" BRANCH="${SBM_BRANCH_LOCAL}" REF="${remote_sha}" bash "${tmp_installer}"; then
+  if REPO="${SBM_REPO_LOCAL}" BRANCH="${SBM_BRANCH_LOCAL}" REF="${update_ref}" bash "${tmp_installer}"; then
     ok "脚本自更新完成"
   else
     err "脚本自更新失败"
