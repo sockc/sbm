@@ -42,7 +42,7 @@ create_backup_archive() {
   manifest="${TMP_DIR}/manifest-${kind}-${ts}.json"
 
   [ -d "${CONFIG_DIR}" ] && entries+=("${CONFIG_DIR#/}")
-  [ -d "${INBOUND_META_DIR}" ] && entries+=("${INBOUND_META_DIR#/}")
+  [ -d "${BASE_DIR}/meta" ] && entries+=("${BASE_DIR#/}/meta")
   [ -d "${BASE_DIR}/realm-meta" ] && entries+=("${BASE_DIR#/}/realm-meta")
   [ -f "${BASE_DIR}/outbound-proxy-state.json" ] && entries+=("${BASE_DIR#/}/outbound-proxy-state.json")
   [ -f "${BASE_DIR}/policy-groups.json" ] && entries+=("${BASE_DIR#/}/policy-groups.json")
@@ -184,7 +184,7 @@ restore_manual_backup() {
   }
   mkdir -p "${TMP_DIR}"
 
-  local idx archive restore_dir old_config pre_archive
+  local idx archive restore_dir old_singbox_dir pre_archive
   show_manual_backups
   echo
 
@@ -239,8 +239,10 @@ restore_manual_backup() {
     return 1
   fi
 
-  old_config="${TMP_DIR}/pre-restore-config.json"
-  [ -f "${CONFIG_DIR}/config.json" ] && cp -p "${CONFIG_DIR}/config.json" "${old_config}" || true
+  old_singbox_dir="${TMP_DIR}/pre-restore-singbox"
+  if [ -d "${CONFIG_DIR}" ]; then
+    cp -a "${CONFIG_DIR}" "${old_singbox_dir}"
+  fi
 
   pre_archive="$(create_backup_archive pre-restore 2>/dev/null || true)"
   [ -n "${pre_archive}" ] && echo "已创建恢复前快照：${pre_archive}"
@@ -263,9 +265,10 @@ restore_manual_backup() {
 
   if ! restart_singbox_after_restore; then
     err "恢复后的配置未能正常启动"
-    if [ -f "${old_config}" ]; then
-      warn "正在自动恢复恢复操作前的 config.json"
-      install -m 600 "${old_config}" "${CONFIG_DIR}/config.json"
+    if [ -d "${old_singbox_dir}" ]; then
+      warn "正在自动恢复恢复操作前的整个 sing-box 配置目录"
+      rm -rf -- "${CONFIG_DIR}"
+      cp -a "${old_singbox_dir}" "${CONFIG_DIR}"
       systemctl restart sing-box >/dev/null 2>&1 || true
     fi
     pause_enter
