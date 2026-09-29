@@ -39,6 +39,7 @@ source "${BASE_DIR}/lib/system_proxy.sh"
 source "${BASE_DIR}/lib/realm_relay.sh"
 
 init_runtime_security
+cleanup_upstream_demo_inbound || true
 
 init_colors() {
   if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
