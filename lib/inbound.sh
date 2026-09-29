@@ -2316,10 +2316,11 @@ menu_inbound_management() {
     echo "7. 查看当前入站实例"
     echo "8. 删除指定入站实例"
     echo "9. 导出客户端配置"
+    echo "10. VLESS 用户管理"
     echo "0. 返回"
     echo
 
-    read -r -p "请选择 [0-9]: " choice
+    read -r -p "请选择 [0-10]: " choice
     case "${choice:-}" in
       1) menu_deploy_vless ;;
       2) menu_deploy_hysteria2 ;;
@@ -2330,6 +2331,7 @@ menu_inbound_management() {
       7) show_current_inbounds ;;
       8) delete_inbound_instance ;;
       9) menu_export_client ;;
+      10) menu_user_management ;;
       0) return ;;
       *) echo "无效选项"; sleep 1 ;;
     esac
