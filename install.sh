@@ -27,6 +27,7 @@ FILES=(
   "lib/backup.sh"
   "lib/self_update.sh"
   "lib/clash_api.sh"
+  "lib/web_panel.sh"
   "lib/template.sh"
   "lib/outbound_wizard.sh"
   "lib/uninstall.sh"
