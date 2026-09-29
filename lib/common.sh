@@ -6,13 +6,14 @@ umask 077
 
 SBM_LOCK_FD=""
 SBM_LOCK_DIR=""
+SBM_RUNTIME_TMP_DIR=""
 
 cleanup_runtime_security() {
   if [ -n "${SBM_LOCK_DIR:-}" ] && [ -d "${SBM_LOCK_DIR}" ]; then
     rmdir "${SBM_LOCK_DIR}" 2>/dev/null || true
   fi
-  if [ -n "${TMP_DIR:-}" ] && [[ "${TMP_DIR}" == /tmp/sbm.* ]] && [ -d "${TMP_DIR}" ]; then
-    rm -rf -- "${TMP_DIR}"
+  if [ -n "${SBM_RUNTIME_TMP_DIR:-}" ] && [ "${TMP_DIR:-}" = "${SBM_RUNTIME_TMP_DIR}" ] && [ -d "${SBM_RUNTIME_TMP_DIR}" ]; then
+    rm -rf -- "${SBM_RUNTIME_TMP_DIR}"
   fi
 }
 
@@ -53,7 +54,10 @@ init_runtime_security() {
     return 1
   }
   chmod 700 "${TMP_DIR}" 2>/dev/null || true
+  SBM_RUNTIME_TMP_DIR="${TMP_DIR}"
   export TMP_DIR
+  trap cleanup_runtime_security EXIT
+  trap 'cleanup_runtime_security; exit 130' INT TERM
 
   mkdir -p "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
   chmod 700 "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
@@ -63,8 +67,6 @@ init_runtime_security() {
   [ -d "${NODE_CACHE_DIR}" ] && find "${NODE_CACHE_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
 
   acquire_sbm_lock || return 1
-  trap cleanup_runtime_security EXIT
-  trap 'cleanup_runtime_security; exit 130' INT TERM
 }
 
 msg()  { echo -e "[*] $*"; }
