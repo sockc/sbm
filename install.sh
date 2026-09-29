@@ -62,31 +62,58 @@ resolve_source_ref() {
     return 0
   fi
 
-  local meta_file sha
-  meta_file="$(mktemp "/tmp/sbm-ref.XXXXXX")"
-  if ! fetch_to "https://api.github.com/repos/${REPO}/commits/${REF}" "${meta_file}"; then
-    die "无法把来源 ${REF} 解析为固定 commit"
+  local sha=""
+  local git_url="https://github.com/${REPO}.git"
+
+  if need_cmd git; then
+    sha="$(
+      env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+          git ls-remote "${git_url}" "refs/heads/${REF}" 2>/dev/null \
+        | awk 'NR==1 {print $1}'
+    )"
+    if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      SOURCE_REF="${sha,,}"
+      return 0
+    fi
+
+    sha="$(
+      git ls-remote "${git_url}" "refs/heads/${REF}" 2>/dev/null \
+        | awk 'NR==1 {print $1}'
+    )"
+    if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      SOURCE_REF="${sha,,}"
+      return 0
+    fi
   fi
 
-  if need_cmd python3; then
-    sha="$(python3 - "${meta_file}" <<'PY'
+  local meta_file
+  meta_file="$(mktemp "/tmp/sbm-ref.XXXXXX")"
+
+  if fetch_to "https://api.github.com/repos/${REPO}/commits/${REF}" "${meta_file}"; then
+    sha="$(
+      python3 - "${meta_file}" <<'PY'
 import json, sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    data = json.load(f)
-print(str(data.get("sha", "") or ""))
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(str(data.get("sha", "") or ""))
+except Exception:
+    print("")
 PY
-)"
-  else
-    sha="$(sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' "${meta_file}" | head -n1)"
+    )"
   fi
 
   rm -f "${meta_file}"
 
-  if ! [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    die "GitHub 返回的 commit SHA 无效"
+  if [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    SOURCE_REF="${sha,,}"
+    return 0
   fi
 
-  SOURCE_REF="${sha,,}"
+  # 最后兼容回退：仍使用 staging + 完整校验，避免因为 GitHub API 不可达而完全无法更新。
+  SOURCE_REF="${REF}"
+  echo "警告：无法解析固定 commit，将直接使用来源 ${REF}" >&2
 }
 
 validate_stage() {
