@@ -75,6 +75,18 @@ create_backup_archive() {
       sha256sum "$(basename "${archive}")" > "$(basename "${archive}").sha256"
       chmod 600 "$(basename "${archive}").sha256" 2>/dev/null || true
     )
+  else
+    python3 - "${archive}" "${archive}.sha256" <<'PY'
+import hashlib, os, sys
+archive, out = sys.argv[1:]
+h = hashlib.sha256()
+with open(archive, "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(chunk)
+with open(out, "w", encoding="utf-8") as f:
+    f.write(f"{h.hexdigest()}  {os.path.basename(archive)}\n")
+PY
+    chmod 600 "${archive}.sha256" 2>/dev/null || true
   fi
 
   printf '%s\n' "${archive}"
@@ -115,10 +127,28 @@ verify_backup_archive() {
   local archive="$1"
   local checksum="${archive}.sha256"
 
-  if [ -f "${checksum}" ] && has_cmd sha256sum; then
-    if ! (cd "$(dirname "${archive}")" && sha256sum -c "$(basename "${checksum}")"); then
-      err "备份 SHA256 校验失败"
-      return 1
+  if [ -f "${checksum}" ]; then
+    if has_cmd sha256sum; then
+      if ! (cd "$(dirname "${archive}")" && sha256sum -c "$(basename "${checksum}")"); then
+        err "备份 SHA256 校验失败"
+        return 1
+      fi
+    else
+      local expected actual
+      expected="$(awk 'NR==1{print $1}' "${checksum}")"
+      actual="$(python3 - "${archive}" <<'PY'
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(chunk)
+print(h.hexdigest())
+PY
+)"
+      if [ -z "${expected}" ] || [ "${actual}" != "${expected}" ]; then
+        err "备份 SHA256 校验失败"
+        return 1
+      fi
     fi
   fi
 
@@ -168,8 +198,9 @@ restore_tree_if_present() {
   [ -e "${src}" ] || return 0
 
   if [ -d "${src}" ]; then
-    mkdir -p "${dst}"
-    cp -a "${src}/." "${dst}/"
+    rm -rf -- "${dst}"
+    mkdir -p "$(dirname "${dst}")"
+    cp -a "${src}" "${dst}"
   else
     mkdir -p "$(dirname "${dst}")"
     cp -a "${src}" "${dst}"
@@ -248,8 +279,9 @@ restore_manual_backup() {
   [ -n "${pre_archive}" ] && echo "已创建恢复前快照：${pre_archive}"
 
   if [ -d "${restore_dir}/etc/sing-box" ]; then
-    mkdir -p "${CONFIG_DIR}"
-    cp -a "${restore_dir}/etc/sing-box/." "${CONFIG_DIR}/"
+    rm -rf -- "${CONFIG_DIR}"
+    mkdir -p "$(dirname "${CONFIG_DIR}")"
+    cp -a "${restore_dir}/etc/sing-box" "${CONFIG_DIR}"
   else
     install -m 600 "${candidate_config}" "${CONFIG_DIR}/config.json"
     [ -f "${restore_dir}/reality-meta.json" ] && install -m 600 "${restore_dir}/reality-meta.json" "${META_FILE}" || true
