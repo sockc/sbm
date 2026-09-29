@@ -1,0 +1,77 @@
+name: SBM CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install.sh
+          bash -n sbm.sh
+          for f in lib/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: ShellCheck errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck --severity=error install.sh sbm.sh lib/*.sh
+
+      - name: JSON validation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          with open("policy-groups.json", "r", encoding="utf-8") as f:
+              json.load(f)
+          print("policy-groups.json: OK")
+          PY
+
+      - name: Static safety checks
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          files = [pathlib.Path("install.sh"), pathlib.Path("sbm.sh"), *pathlib.Path("lib").glob("*.sh")]
+          failed = False
+
+          for path in files:
+              text = path.read_text(encoding="utf-8")
+              defs = re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", text, flags=re.M)
+              dup = sorted({name for name in defs if defs.count(name) > 1})
+              if dup:
+                  print(f"{path}: duplicate functions: {', '.join(dup)}")
+                  failed = True
+
+              forbidden = [
+                  'bash -c "$(curl',
+                  "chmod 777",
+              ]
+              for token in forbidden:
+                  if token in text:
+                      print(f"{path}: forbidden pattern: {token}")
+                      failed = True
+
+          if failed:
+              sys.exit(1)
+          print("static safety checks: OK")
+          PY

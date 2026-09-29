@@ -120,10 +120,27 @@ choose_ui_preset() {
 
 clear_clash_ui_dir() {
   local ui_dir="$1"
+  local target
   [ -z "${ui_dir}" ] && ui_dir="dashboard"
 
-  if [ -d "${CONFIG_DIR}/${ui_dir}" ]; then
-    rm -rf "${CONFIG_DIR:?}/${ui_dir}"
+  target="$(python3 - "${CONFIG_DIR}" "${ui_dir}" <<'PY'
+import os, sys
+base = os.path.realpath(sys.argv[1])
+candidate = os.path.realpath(os.path.join(base, sys.argv[2]))
+try:
+    if os.path.commonpath([base, candidate]) != base or candidate == base:
+        raise SystemExit(1)
+except ValueError:
+    raise SystemExit(1)
+print(candidate)
+PY
+)" || {
+    err "UI 目录不安全，拒绝删除：${ui_dir}"
+    return 1
+  }
+
+  if [ -d "${target}" ]; then
+    rm -rf -- "${target}"
   fi
 }
 
@@ -310,7 +327,7 @@ show_clash_api_status() {
   echo "UI 下载出口       : ${CLASH_API_UI_DETOUR:-默认出口}"
 
   if [ -n "${CLASH_API_SECRET}" ]; then
-    echo "API Secret        : ${CLASH_API_SECRET}"
+    echo "API Secret        : $(mask_secret "${CLASH_API_SECRET}")"
   else
     echo "API Secret        : 未设置"
   fi

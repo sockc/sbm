@@ -75,7 +75,8 @@ install_realm_latest() {
 
   ensure_realm_dirs
 
-  local target arch api_url download_url tmp_json tmp_tar tmp_dir
+  local target api_url tmp_json tmp_tar tmp_dir
+  local download_url expected_sha asset_name actual_sha
   target="$(detect_realm_arch)" || {
     err "当前架构暂未在脚本中适配：$(uname -m)"
     pause_enter
@@ -92,96 +93,123 @@ install_realm_latest() {
   tmp_json="${TMP_DIR}/realm-release.json"
   tmp_tar="${TMP_DIR}/realm.tar.gz"
   tmp_dir="${TMP_DIR}/realm-extract"
+  asset_name="realm-${target}.tar.gz"
 
   if has_cmd curl; then
-    curl -fsSL "${api_url}" -o "${tmp_json}" || {
+    curl --retry 2 --connect-timeout 15 -fsSL "${api_url}" -o "${tmp_json}" || {
       err "获取 Realm 最新版本信息失败"
       pause_enter
       return 1
     }
   else
-    wget -qO "${tmp_json}" "${api_url}" || {
+    wget -T 20 -qO "${tmp_json}" "${api_url}" || {
       err "获取 Realm 最新版本信息失败"
       pause_enter
       return 1
     }
   fi
 
-  download_url="$(python3 - "${tmp_json}" "${target}" <<'PY'
+  mapfile -t _realm_asset < <(python3 - "${tmp_json}" "${asset_name}" <<'PY'
 import json, sys
-data = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
-target = sys.argv[2]
-assets = data.get("assets", [])
-for a in assets:
-    url = str(a.get("browser_download_url", "") or "")
-    name = str(a.get("name", "") or "")
-    if target in name and name.endswith(".tar.gz"):
-        print(url)
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+wanted = sys.argv[2]
+for a in data.get("assets", []):
+    if str(a.get("name", "")) == wanted:
+        print(str(a.get("browser_download_url", "") or ""))
+        digest = str(a.get("digest", "") or "")
+        print(digest.split(":", 1)[1] if digest.startswith("sha256:") else "")
         raise SystemExit(0)
 raise SystemExit(1)
 PY
-)" || {
-    err "未找到适配当前架构的 Realm 发布包：${target}"
+  )
+
+  download_url="${_realm_asset[0]:-}"
+  expected_sha="${_realm_asset[1]:-}"
+
+  if [ -z "${download_url}" ]; then
+    err "未找到精确匹配当前架构的 Realm 发布包：${asset_name}"
     pause_enter
     return 1
-  }
+  fi
+
+  if [ -z "${expected_sha}" ]; then
+    err "GitHub Release 未提供该 Realm 资产的 SHA256 digest，已拒绝未校验安装"
+    pause_enter
+    return 1
+  fi
 
   if has_cmd curl; then
-    curl -fsSL "${download_url}" -o "${tmp_tar}" || {
+    curl --retry 2 --connect-timeout 15 -fsSL "${download_url}" -o "${tmp_tar}" || {
       err "下载 Realm 失败"
       pause_enter
       return 1
     }
   else
-    wget -qO "${tmp_tar}" "${download_url}" || {
+    wget -T 30 -qO "${tmp_tar}" "${download_url}" || {
       err "下载 Realm 失败"
       pause_enter
       return 1
     }
   fi
 
-  rm -rf "${tmp_dir}"
+  if has_cmd sha256sum; then
+    actual_sha="$(sha256sum "${tmp_tar}" | awk '{print $1}')"
+  else
+    actual_sha="$(python3 - "${tmp_tar}" <<'PY'
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(chunk)
+print(h.hexdigest())
+PY
+)"
+  fi
+
+  if [ "${actual_sha}" != "${expected_sha}" ]; then
+    err "Realm SHA256 校验失败，已停止安装"
+    echo "期望: ${expected_sha}"
+    echo "实际: ${actual_sha}"
+    rm -f "${tmp_tar}"
+    pause_enter
+    return 1
+  fi
+
+  rm -rf -- "${tmp_dir}"
   mkdir -p "${tmp_dir}"
 
-  tar -xzf "${tmp_tar}" -C "${tmp_dir}" || {
+  if ! tar -tzf "${tmp_tar}" >/dev/null 2>&1; then
+    err "Realm 压缩包格式无效：${tmp_tar}"
+    pause_enter
+    return 1
+  fi
+
+  if ! tar -xzf "${tmp_tar}" -C "${tmp_dir}"; then
     err "解压 Realm 失败"
+    pause_enter
+    return 1
+  fi
+
+  local realm_path
+  realm_path="$(
+    find "${tmp_dir}" -type f       \( -name 'realm' -o -name 'realm-*' \)       ! -name '*.txt'       ! -name '*.md'       ! -name '*.sha256'       ! -name '*.sha256sum'       | head -n1
+  )"
+
+  if [ -z "${realm_path}" ] || [ ! -f "${realm_path}" ]; then
+    echo "解压目录内容如下："
+    find "${tmp_dir}" -maxdepth 3 -type f | sed -n '1,50p'
+    err "解压后未找到 realm 可执行文件"
+    pause_enter
+    return 1
+  fi
+
+  install -m 0755 "${realm_path}" "${REALM_BIN}" || {
+    err "安装 Realm 到 ${REALM_BIN} 失败"
     pause_enter
     return 1
   }
 
-  local realm_path
-# 先看压缩包里到底有什么，便于排错
-if ! tar -tzf "${tmp_tar}" >/dev/null 2>&1; then
-  err "Realm 压缩包格式无效：${tmp_tar}"
-  pause_enter
-  return 1
-fi
-
-realm_path="$(
-  find "${tmp_dir}" -type f \
-    \( -name 'realm' -o -name 'realm-*' \) \
-    ! -name '*.txt' \
-    ! -name '*.md' \
-    ! -name '*.sha256' \
-    ! -name '*.sha256sum' \
-    | head -n1
-)"
-
-if [ -z "${realm_path}" ] || [ ! -f "${realm_path}" ]; then
-  echo "解压目录内容如下："
-  find "${tmp_dir}" -maxdepth 3 -type f | sed -n '1,50p'
-  err "解压后未找到 realm 可执行文件"
-  pause_enter
-  return 1
-fi
-
-install -m 0755 "${realm_path}" "${REALM_BIN}" || {
-  err "安装 Realm 到 ${REALM_BIN} 失败"
-  pause_enter
-  return 1
-}
-
-  ok "Realm 安装完成：${REALM_BIN}"
+  ok "Realm 安装完成并通过 SHA256 校验：${REALM_BIN}"
   "${REALM_BIN}" --version 2>/dev/null || true
   pause_enter
 }

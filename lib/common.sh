@@ -1,5 +1,74 @@
 #!/usr/bin/env bash
 
+# Security defaults for all sbm runtime-created files.
+# Individual modules may tighten permissions further, but must not loosen them.
+umask 077
+
+SBM_LOCK_FD=""
+SBM_LOCK_DIR=""
+SBM_RUNTIME_TMP_DIR=""
+
+cleanup_runtime_security() {
+  if [ -n "${SBM_LOCK_DIR:-}" ] && [ -d "${SBM_LOCK_DIR}" ]; then
+    rmdir "${SBM_LOCK_DIR}" 2>/dev/null || true
+  fi
+  if [ -n "${SBM_RUNTIME_TMP_DIR:-}" ] && [ "${TMP_DIR:-}" = "${SBM_RUNTIME_TMP_DIR}" ] && [ -d "${SBM_RUNTIME_TMP_DIR}" ]; then
+    rm -rf -- "${SBM_RUNTIME_TMP_DIR}"
+  fi
+}
+
+acquire_sbm_lock() {
+  local lock_file
+  if [ -d /run/lock ] && [ -w /run/lock ]; then
+    lock_file="/run/lock/sbm.lock"
+  else
+    lock_file="/tmp/sbm-${UID:-$(id -u)}.lock"
+  fi
+
+  if has_cmd flock; then
+    if ! { exec 9>"${lock_file}"; }; then
+      err "无法创建 sbm 锁文件：${lock_file}"
+      return 1
+    fi
+    if ! flock -n 9; then
+      err "检测到另一个 sbm 实例正在运行，请先退出另一个会话后再试"
+      return 1
+    fi
+    SBM_LOCK_FD="9"
+    return 0
+  fi
+
+  SBM_LOCK_DIR="${lock_file}.d"
+  if ! mkdir "${SBM_LOCK_DIR}" 2>/dev/null; then
+    err "检测到另一个 sbm 实例正在运行（或存在遗留锁：${SBM_LOCK_DIR}）"
+    return 1
+  fi
+}
+
+init_runtime_security() {
+  umask 077
+
+  local base_tmp="${TMPDIR:-/tmp}"
+  TMP_DIR="$(mktemp -d "${base_tmp%/}/sbm.XXXXXX")" || {
+    err "创建安全临时目录失败"
+    return 1
+  }
+  chmod 700 "${TMP_DIR}" 2>/dev/null || true
+  SBM_RUNTIME_TMP_DIR="${TMP_DIR}"
+  export TMP_DIR
+  trap cleanup_runtime_security EXIT
+  trap 'cleanup_runtime_security; exit 130' INT TERM
+
+  mkdir -p "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
+  chmod 700 "${INBOUND_META_DIR}" "${SOURCES_DIR}" "${NODE_CACHE_DIR}" 2>/dev/null || true
+  [ -f "${CONFIG_DIR}/config.json" ] && chmod 600 "${CONFIG_DIR}/config.json" 2>/dev/null || true
+  [ -d "${INBOUND_META_DIR}" ] && find "${INBOUND_META_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
+  [ -d "${SOURCES_DIR}" ] && find "${SOURCES_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
+  [ -d "${NODE_CACHE_DIR}" ] && find "${NODE_CACHE_DIR}" -type f -exec chmod 600 {} + 2>/dev/null || true
+
+  acquire_sbm_lock || return 1
+}
+
 msg()  { echo -e "[*] $*"; }
 ok()   { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
@@ -101,4 +170,60 @@ detect_tailscale_ip() {
   fi
 
   return 1
+}
+
+
+require_config_file() {
+  if [ ! -f "${CONFIG_DIR}/config.json" ]; then
+    err "未找到 ${CONFIG_DIR}/config.json，请先部署入站实例"
+    return 1
+  fi
+}
+
+require_python3() {
+  if ! has_cmd python3; then
+    err "缺少 python3，无法处理 JSON"
+    return 1
+  fi
+}
+
+mask_secret() {
+  local value="${1:-}"
+  local len="${#value}"
+  if [ "${len}" -le 8 ]; then
+    printf '%s\n' "********"
+  else
+    printf '%s****%s\n' "${value:0:4}" "${value: -4}"
+  fi
+}
+
+mask_url() {
+  local value="${1:-}"
+  if [ -z "${value}" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  if has_cmd python3; then
+    python3 - "${value}" <<'PY'
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+raw = sys.argv[1]
+try:
+    p = urlsplit(raw)
+    if p.scheme not in ("http", "https"):
+        print(raw)
+        raise SystemExit(0)
+    host = p.hostname or ""
+    port = f":{p.port}" if p.port else ""
+    netloc = host + port
+    path = "/…" if p.path else ""
+    print(urlunsplit((p.scheme, netloc, path, "", "")))
+except Exception:
+    print("<已隐藏>")
+PY
+  else
+    printf '%s\n' "<已隐藏>"
+  fi
 }

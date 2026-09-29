@@ -3,21 +3,25 @@
 create_uninstall_backup() {
   need_root
 
-  mkdir -p "${BACKUP_DIR}" "${TMP_DIR}"
-
-  local ts backup_file
-  ts="$(date +%Y%m%d-%H%M%S)"
-  backup_file="${BACKUP_DIR}/uninstall-${ts}.tar.gz"
-
-  if ! tar -czf "${backup_file}" \
-    -C / \
-    etc/sing-box \
-    usr/local/share/sbm 2>/dev/null; then
-    warn "卸载前备份创建失败，已跳过"
-    return 1
+  local backup_file
+  if declare -F create_backup_archive >/dev/null 2>&1; then
+    backup_file="$(create_backup_archive uninstall)" || {
+      warn "卸载前备份创建失败"
+      return 1
+    }
+  else
+    mkdir -p "${SBM_BACKUP_ROOT:-/var/backups/sbm}"
+    chmod 700 "${SBM_BACKUP_ROOT:-/var/backups/sbm}" 2>/dev/null || true
+    backup_file="${SBM_BACKUP_ROOT:-/var/backups/sbm}/uninstall-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "${backup_file}" -C / etc/sing-box usr/local/share/sbm 2>/dev/null || {
+      warn "卸载前备份创建失败"
+      return 1
+    }
+    chmod 600 "${backup_file}" 2>/dev/null || true
   fi
 
   ok "已创建卸载前备份：${backup_file}"
+  echo "该备份位于 /etc/sing-box 之外，完整卸载后仍会保留。"
   return 0
 }
 
@@ -136,6 +140,7 @@ uninstall_full() {
   echo "3. 删除 sing-box 服务文件与二进制"
   echo "4. 删除 /etc/sing-box"
   echo "5. 删除 sbm 菜单入口与脚本目录"
+  echo "6. 卸载前备份保留在 ${SBM_BACKUP_ROOT:-/var/backups/sbm}"
   echo
 
   if ! confirm_default_no "确认继续吗？"; then

@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
 
-require_config_file() {
-  if [ ! -f "${CONFIG_DIR}/config.json" ]; then
-    err "未找到 ${CONFIG_DIR}/config.json，请先部署入站实例"
-    return 1
-  fi
-}
-
-require_python3() {
-  if ! has_cmd python3; then
-    err "缺少 python3，无法处理 JSON"
-    return 1
-  fi
-}
-
 list_protocol_meta_files() {
   local protocol="$1"
 
