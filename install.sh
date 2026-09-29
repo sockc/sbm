@@ -21,6 +21,7 @@ FILES=(
   "lib/inbound.sh"
   "lib/export.sh"
   "lib/user.sh"
+  "lib/inbound_manager.sh"
   "lib/outbound.sh"
   "lib/firewall.sh"
   "lib/backup.sh"

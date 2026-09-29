@@ -199,7 +199,7 @@ deploy_vless_reality() {
 
   reality_tag="$(prompt_default "请输入 Reality 实例标签" "$(next_inbound_tag_by_prefix "reality")")"
   listen_addr="$(prompt_listen_addr)"
-  listen_port="$(prompt_listen_port)"
+  listen_port="$(prompt_available_port "请输入监听端口" "443" "tcp" "${reality_tag}")"
   user_name="$(prompt_default "请输入用户备注" "${reality_tag}")"
   user_uuid="$(prompt_default "请输入 UUID" "$(gen_uuid)")"
   server_name="$(prompt_default "请输入伪装域名 server_name" "download.visualstudio.microsoft.com")"
@@ -971,7 +971,7 @@ deploy_hysteria2() {
 
   hy2_tag="$(prompt_default "请输入 Hysteria2 实例标签" "$(next_inbound_tag_by_prefix "hy2")")"
   listen_addr="$(prompt_listen_addr)"
-  listen_port="$(prompt_port_default "请输入 Hysteria2 监听端口" "8443")"
+  listen_port="$(prompt_available_port "请输入 Hysteria2 监听端口" "8443" "udp" "${hy2_tag}")"
   user_name="$(prompt_default "请输入 Hysteria2 用户备注" "${hy2_tag}")"
   password="$(prompt_default "请输入 Hysteria2 密码" "$(gen_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "${default_host}")"
@@ -1326,12 +1326,12 @@ deploy_vmess() {
 
   listen_addr="$(prompt_listen_addr)"
   if [ "${tls_enabled}" = "true" ]; then
-    listen_port="$(prompt_port_default "请输入 VMess 监听端口" "443")"
+    listen_port="$(prompt_available_port "请输入 VMess 监听端口" "443" "tcp" "${vmess_tag}")"
   else
     if [ "${transport_type}" = "http" ]; then
-      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "8080")"
+      listen_port="$(prompt_available_port "请输入 VMess 监听端口" "8080" "tcp" "${vmess_tag}")"
     else
-      listen_port="$(prompt_port_default "请输入 VMess 监听端口" "80")"
+      listen_port="$(prompt_available_port "请输入 VMess 监听端口" "80" "tcp" "${vmess_tag}")"
     fi
   fi
 
@@ -1640,7 +1640,7 @@ deploy_tuic() {
 
   tuic_tag="$(prompt_default "请输入 TUIC 实例标签" "$(next_inbound_tag_by_prefix "tuic")")"
   listen_addr="$(prompt_listen_addr)"
-  listen_port="$(prompt_port_default "请输入 TUIC 监听端口" "443")"
+  listen_port="$(prompt_available_port "请输入 TUIC 监听端口" "443" "udp" "${tuic_tag}")"
   user_name="$(prompt_default "请输入 TUIC 用户备注" "${tuic_tag}")"
   uuid="$(prompt_default "请输入 UUID" "$(gen_uuid_value)")"
   password="$(prompt_default "请输入 TUIC 密码" "$(gen_password)")"
@@ -2030,7 +2030,7 @@ deploy_anytls_tls() {
 
   tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
   listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
-  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
@@ -2161,7 +2161,7 @@ deploy_anytls_reality() {
 
   tag="$(prompt_default "请输入 AnyTLS 实例标签" "anytls-$(date +%H%M%S)")"
   listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
-  listen_port="$(prompt_default "请输入 AnyTLS 监听端口" "$(anytls_rand_port)")"
+  listen_port="$(prompt_available_port "请输入 AnyTLS 监听端口" "$(anytls_rand_port)" "tcp" "${tag}")"
   user_name="$(prompt_default "请输入 AnyTLS 用户备注" "anytls-user1")"
   password="$(prompt_default "请输入 AnyTLS 密码" "$(anytls_rand_password)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
@@ -2442,7 +2442,7 @@ deploy_vless_tls() {
 
   vless_tag="$(prompt_default "请输入 VLESS 实例标签" "vless-$(date +%H%M%S)")"
   listen="$(prompt_default "请输入监听地址" "0.0.0.0")"
-  listen_port="$(prompt_default "请输入 VLESS 监听端口" "$(random_port)")"
+  listen_port="$(prompt_available_port "请输入 VLESS 监听端口" "$(random_port)" "tcp" "${vless_tag}")"
   user_name="$(prompt_default "请输入 VLESS 用户备注" "vless-user1")"
   user_uuid="$(prompt_default "请输入 VLESS UUID" "$(gen_uuid)")"
   connect_host="$(prompt_default "请输入客户端连接地址" "$(detect_default_connect_host)")"
@@ -2990,6 +2990,9 @@ deploy_direct_relay() {
   listen_addr="$(prompt_listen_addr)"
   listen_port="$(prompt_port_default "请输入中转监听端口" "12345")"
   network="$(prompt_relay_network)"
+  while ! check_port_available "${listen_port}" "${network}" "${relay_tag}"; do
+    listen_port="$(prompt_port_default "请输入中转监听端口" "${listen_port}")"
+  done
   target_host="$(prompt_required "请输入后端目标地址（落地机 IP/域名）")"
   target_port="$(prompt_port_default "请输入后端目标端口" "443")"
   route_outbound="$(select_route_outbound_tag)" || {
@@ -3352,6 +3355,9 @@ edit_direct_relay_instance() {
   listen_addr="$(prompt_default "请输入监听地址" "${cur_listen}")"
   listen_port="$(prompt_port_default "请输入中转监听端口" "${cur_port}")"
   network="$(prompt_relay_network_default "${cur_network}")"
+  while ! check_port_available "${listen_port}" "${network}" "${tag}"; do
+    listen_port="$(prompt_port_default "请输入中转监听端口" "${listen_port}")"
+  done
   target_host="$(prompt_default "请输入后端目标地址（落地机 IP/域名）" "${cur_target_host}")"
   target_port="$(prompt_port_default "请输入后端目标端口" "${cur_target_port}")"
 
