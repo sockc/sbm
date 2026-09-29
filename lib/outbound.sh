@@ -235,7 +235,7 @@ show_outbound_sources() {
   while IFS= read -r meta_path; do
     [ -z "${meta_path}" ] && continue
     mapfile -t _src_meta < <(read_source_meta_fields "${meta_path}")
-    echo "[$idx] ${_src_meta[1]:-} -> ${_src_meta[3]:-}"
+    echo "[$idx] ${_src_meta[1]:-} -> $(mask_url "${_src_meta[3]:-}")"
     idx=$((idx + 1))
   done < <(list_source_meta_files)
 }
@@ -741,7 +741,7 @@ PY
   pause_enter
 }
 
-get_clash_api_runtime() {
+get_outbound_clash_api_runtime() {
   require_outbound_manage_env || return 1
 
   python3 - "${CONFIG_DIR}/config.json" <<'PY'
@@ -771,7 +771,7 @@ clash_api_request() {
   local body="${3:-}"
 
   local controller secret
-  mapfile -t _clash_runtime < <(get_clash_api_runtime)
+  mapfile -t _clash_runtime < <(get_outbound_clash_api_runtime)
   controller="${_clash_runtime[0]:-}"
   secret="${_clash_runtime[1]:-}"
 
@@ -1478,11 +1478,6 @@ menu_route_template_shortcuts() {
       *) echo "无效选项"; sleep 1 ;;
     esac
   done
-}
-
-print_outbound_status_line() {
-  local l1="$1" v1="$2" l2="$3" v2="$4"
-  printf "%-10s %-14s %-10s %s\n" "${l1}" "${v1}" "${l2}" "${v2}"
 }
 
 get_outbound_status_info() {
