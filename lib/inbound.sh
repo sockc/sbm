@@ -789,7 +789,7 @@ transport_type = str(transport.get("type", "") or "")
 print(f"实例标签 : {tag}")
 print(f"协议类型 : {label}")
 print(f"监听地址 : {endpoint}")
-print(f"用户数量 : {user_count}")
+print(f"认证数量 : {user_count}")
 if network:
     print(f"网络类型 : {network}")
 if transport_type:
@@ -925,6 +925,463 @@ delete_inbound_instance() {
   delete_inbound_instance_by_tag "${tag}"
 }
 
+
+get_inbound_edit_info() {
+  local tag="$1"
+
+  python3 - "${CONFIG_DIR}/config.json" "${tag}" <<'PY'
+import json, sys
+
+cfg = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+tag = sys.argv[2]
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit(1)
+
+typ = str(ib.get("type", "") or "")
+tls = ib.get("tls", {}) or {}
+reality = tls.get("reality", {}) or {}
+handshake = reality.get("handshake", {}) or {}
+users = ib.get("users", [])
+print(typ)
+print(str(ib.get("listen_port", "") or ""))
+print("true" if tls.get("enabled") is True else "false")
+print("true" if reality.get("enabled") is True else "false")
+print(str(tls.get("server_name", "") or ""))
+print(str(tls.get("certificate_path", "") or ""))
+print(str(tls.get("key_path", "") or ""))
+print(str(handshake.get("server", "") or ""))
+print(str(handshake.get("server_port", "") or ""))
+print(str(len(users) if isinstance(users, list) else 0))
+PY
+}
+
+get_inbound_meta_field() {
+  local tag="$1"
+  local field="$2"
+  local meta_file
+
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+  [ -f "${meta_file}" ] || return 1
+
+  python3 - "${meta_file}" "${field}" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+value = data.get(sys.argv[2], "")
+if value is None:
+    value = ""
+print(value)
+PY
+}
+
+apply_inbound_edit() {
+  local tag="$1"
+  local operation="$2"
+  local value1="${3:-}"
+  local value2="${4:-}"
+  local value3="${5:-}"
+
+  local tmp_cfg meta_file tmp_meta=""
+  tmp_cfg="${TMP_DIR}/config.edit-inbound.json"
+  meta_file="$(inbound_meta_file_by_tag "${tag}")"
+
+  cp -f "${CONFIG_DIR}/config.json" "${tmp_cfg}" || return 1
+  if [ -f "${meta_file}" ]; then
+    tmp_meta="${TMP_DIR}/meta.edit-inbound.json"
+    cp -p "${meta_file}" "${tmp_meta}" || {
+      rm -f -- "${tmp_cfg}"
+      return 1
+    }
+  fi
+
+  if ! python3 - "${tmp_cfg}" "${tmp_meta}" "${tag}" "${operation}" "${value1}" "${value2}" "${value3}" <<'PY'
+import json, os, sys
+
+cfg_path, meta_path, tag, op, v1, v2, v3 = sys.argv[1:]
+cfg = json.load(open(cfg_path, "r", encoding="utf-8"))
+ib = next((x for x in cfg.get("inbounds", []) if str(x.get("tag", "") or "") == tag), None)
+if ib is None:
+    raise SystemExit("未找到目标入站")
+
+typ = str(ib.get("type", "") or "")
+tls = ib.setdefault("tls", {}) if op in ("sni", "handshake", "reality_keys", "certificate") else (ib.get("tls", {}) or {})
+meta = None
+if meta_path and os.path.exists(meta_path):
+    try:
+        meta = json.load(open(meta_path, "r", encoding="utf-8"))
+    except Exception:
+        meta = None
+
+if op == "port":
+    ib["listen_port"] = int(v1)
+    if meta is not None:
+        meta["listen_port"] = int(v1)
+
+elif op == "sni":
+    reality = tls.get("reality", {}) or {}
+    # server_name 仅在原配置已有该字段时改服务端；其余协议的 SNI 属于客户端导出信息。
+    if "server_name" in tls:
+        tls["server_name"] = v1
+    if meta is not None:
+        meta["server_name"] = v1
+
+elif op == "credential":
+    users = ib.get("users", [])
+    if not isinstance(users, list) or len(users) != 1:
+        raise SystemExit("实例不是单凭证配置，为避免误伤多用户，已拒绝自动重生成")
+    user = users[0]
+    if typ in ("vless", "vmess", "tuic"):
+        user["uuid"] = v1
+        if meta is not None:
+            if typ == "vless":
+                meta["user_uuid"] = v1
+                if "uuid" in meta:
+                    meta["uuid"] = v1
+            else:
+                meta["uuid"] = v1
+    elif typ in ("hysteria2", "anytls"):
+        user["password"] = v1
+        if meta is not None:
+            meta["password"] = v1
+    else:
+        raise SystemExit("当前协议不支持重生成凭证")
+
+elif op == "handshake":
+    reality = tls.get("reality", {}) or {}
+    if reality.get("enabled") is not True:
+        raise SystemExit("当前实例不是 Reality")
+    handshake = reality.setdefault("handshake", {})
+    handshake["server"] = v1
+    handshake["server_port"] = int(v2)
+    if meta is not None:
+        meta["handshake_server"] = v1
+        meta["handshake_port"] = int(v2)
+
+elif op == "reality_keys":
+    reality = tls.get("reality", {}) or {}
+    if reality.get("enabled") is not True:
+        raise SystemExit("当前实例不是 Reality")
+    reality["private_key"] = v1
+    reality["short_id"] = [v3]
+    if meta is not None:
+        meta["reality_private_key"] = v1
+        meta["reality_public_key"] = v2
+        meta["reality_short_id"] = v3
+        if "private_key" in meta:
+            meta["private_key"] = v1
+        if "public_key" in meta:
+            meta["public_key"] = v2
+        if "short_id" in meta:
+            meta["short_id"] = v3
+
+elif op == "certificate":
+    if tls.get("enabled") is not True:
+        raise SystemExit("当前实例未启用 TLS")
+    reality = tls.get("reality", {}) or {}
+    if reality.get("enabled") is True:
+        raise SystemExit("Reality 实例不使用证书路径")
+    tls["certificate_path"] = v1
+    tls["key_path"] = v2
+    if meta is not None:
+        meta["certificate_path"] = v1
+        meta["key_path"] = v2
+
+else:
+    raise SystemExit("未知修改操作")
+
+with open(cfg_path, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+if meta is not None:
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+PY
+  then
+    err "修改实例失败"
+    rm -f -- "${tmp_cfg}" "${tmp_meta}"
+    pause_enter
+    return 1
+  fi
+
+  if ! check_config_file "${tmp_cfg}"; then
+    err "修改后的配置校验失败，未写入正式配置"
+    rm -f -- "${tmp_cfg}" "${tmp_meta}"
+    pause_enter
+    return 1
+  fi
+
+  activate_config_file "${tmp_cfg}"
+
+  if ! restart_singbox_service; then
+    err "服务重启失败；配置已尝试自动回滚，客户端元数据保持原样"
+    rm -f -- "${tmp_cfg}" "${tmp_meta}"
+    pause_enter
+    return 1
+  fi
+
+  if [ -n "${tmp_meta}" ] && [ -f "${tmp_meta}" ]; then
+    install -m 600 "${tmp_meta}" "${meta_file}"
+  fi
+
+  rm -f -- "${tmp_cfg}" "${tmp_meta}"
+  ok "实例修改完成：${tag}"
+  pause_enter
+}
+
+edit_inbound_port() {
+  local tag="$1"
+  local typ="$2"
+  local current_port network new_port
+
+  current_port="$(get_inbound_edit_info "${tag}" | sed -n '2p')"
+  network="$(inbound_transport_for_type "${typ}")"
+  new_port="$(prompt_available_port "请输入新的监听端口" "${current_port}" "${network}" "${tag}")" || return 1
+
+  [ "${new_port}" = "${current_port}" ] && {
+    warn "端口没有变化"
+    pause_enter
+    return 0
+  }
+
+  echo "监听端口：${current_port} -> ${new_port}/${network}"
+  if ! confirm_default_yes "确认修改并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "port" "${new_port}"
+}
+
+edit_inbound_sni() {
+  local tag="$1"
+  local current_sni new_sni
+
+  current_sni="$(get_inbound_meta_field "${tag}" "server_name" 2>/dev/null || true)"
+  if [ -z "${current_sni}" ]; then
+    current_sni="$(get_inbound_edit_info "${tag}" | sed -n '5p')"
+  fi
+
+  new_sni="$(prompt_default "请输入新的客户端 SNI" "${current_sni}")"
+  [ -n "${new_sni}" ] || {
+    err "SNI 不能为空"
+    pause_enter
+    return 1
+  }
+
+  if [ "${new_sni}" = "${current_sni}" ]; then
+    warn "SNI 没有变化"
+    pause_enter
+    return 0
+  fi
+
+  warn "如果当前使用正式/自签 TLS 证书，请确认新 SNI 与证书匹配。"
+  if ! confirm_default_yes "确认修改 SNI 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "sni" "${new_sni}"
+}
+
+regenerate_inbound_credential() {
+  local tag="$1"
+  local typ="$2"
+  local value label
+
+  case "${typ}" in
+    vless|vmess|tuic)
+      value="$(gen_uuid_value)"
+      label="UUID"
+      ;;
+    hysteria2)
+      value="$(gen_password)"
+      label="密码"
+      ;;
+    anytls)
+      value="$(anytls_rand_password)"
+      label="密码"
+      ;;
+    *)
+      err "当前协议不支持重生成认证信息"
+      pause_enter
+      return 1
+      ;;
+  esac
+
+  echo "将为实例 ${tag} 重新生成${label}。"
+  warn "修改后，使用旧认证信息的客户端会立即失效。"
+  if ! confirm_default_no "确认继续吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "credential" "${value}"
+  local rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    echo
+    echo "新的${label}：${value}"
+    echo "请重新导出客户端配置。"
+    pause_enter
+  fi
+  return "${rc}"
+}
+
+edit_reality_handshake() {
+  local tag="$1"
+  local current_host current_port new_host new_port
+
+  current_host="$(get_inbound_edit_info "${tag}" | sed -n '8p')"
+  current_port="$(get_inbound_edit_info "${tag}" | sed -n '9p')"
+  [ -n "${current_port}" ] || current_port="443"
+
+  new_host="$(prompt_default "请输入 Reality 握手目标域名" "${current_host}")"
+  new_port="$(prompt_port_default "请输入 Reality 握手目标端口" "${current_port}")"
+
+  if ! confirm_default_yes "确认修改 Reality 握手目标吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "handshake" "${new_host}" "${new_port}"
+}
+
+regenerate_reality_keys() {
+  local tag="$1"
+  local pair private_key public_key short_id
+
+  pair="$(gen_reality_keypair)" || {
+    pause_enter
+    return 1
+  }
+  private_key="${pair%%|*}"
+  public_key="${pair##*|}"
+  short_id="$(gen_short_id)"
+
+  warn "重新生成 Reality 密钥后，现有客户端配置会立即失效。"
+  if ! confirm_default_no "确认重新生成 Reality 密钥和 Short ID 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "reality_keys" "${private_key}" "${public_key}" "${short_id}"
+  local rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    echo
+    echo "新的 Public Key : ${public_key}"
+    echo "新的 Short ID   : ${short_id}"
+    echo "请重新导出客户端配置。"
+    pause_enter
+  fi
+  return "${rc}"
+}
+
+edit_inbound_certificate() {
+  local tag="$1"
+  local current_cert current_key new_cert new_key
+
+  current_cert="$(get_inbound_edit_info "${tag}" | sed -n '6p')"
+  current_key="$(get_inbound_edit_info "${tag}" | sed -n '7p')"
+
+  new_cert="$(prompt_default "请输入新的 certificate_path" "${current_cert}")"
+  new_key="$(prompt_default "请输入新的 key_path" "${current_key}")"
+
+  if [ ! -f "${new_cert}" ]; then
+    err "证书文件不存在：${new_cert}"
+    pause_enter
+    return 1
+  fi
+  if [ ! -f "${new_key}" ]; then
+    err "私钥文件不存在：${new_key}"
+    pause_enter
+    return 1
+  fi
+
+  if ! confirm_default_yes "确认替换证书路径并重启 sing-box 吗？"; then
+    warn "已取消"
+    pause_enter
+    return 0
+  fi
+
+  apply_inbound_edit "${tag}" "certificate" "${new_cert}" "${new_key}"
+}
+
+menu_modify_inbound_instance() {
+  local tag="$1"
+  local typ="$2"
+
+  while true; do
+    local tls_enabled reality_enabled credential_label
+    tls_enabled="$(get_inbound_edit_info "${tag}" | sed -n '3p')"
+    reality_enabled="$(get_inbound_edit_info "${tag}" | sed -n '4p')"
+
+    case "${typ}" in
+      vless|vmess|tuic) credential_label="重新生成 UUID" ;;
+      hysteria2|anytls) credential_label="重新生成密码" ;;
+      *) credential_label="重新生成认证信息" ;;
+    esac
+
+    clear
+    echo "======================================"
+    echo "              修改实例"
+    echo "======================================"
+    echo "实例：${tag}"
+    echo
+    echo "1. 修改监听端口"
+    echo "2. ${credential_label}"
+    if [ "${tls_enabled}" = "true" ]; then
+      echo "3. 修改客户端 SNI"
+    fi
+    if [ "${reality_enabled}" = "true" ]; then
+      echo "4. 修改 Reality 握手目标"
+      echo "5. 重新生成 Reality 密钥"
+    elif [ "${tls_enabled}" = "true" ]; then
+      echo "4. 修改 TLS 证书路径"
+    fi
+    echo "0. 返回"
+    echo
+
+    local choice
+    read -r -p "请选择: " choice
+    case "${choice:-}" in
+      1) edit_inbound_port "${tag}" "${typ}" ;;
+      2) regenerate_inbound_credential "${tag}" "${typ}" ;;
+      3)
+        if [ "${tls_enabled}" = "true" ]; then
+          edit_inbound_sni "${tag}"
+        else
+          echo "无效选项"; sleep 1
+        fi
+        ;;
+      4)
+        if [ "${reality_enabled}" = "true" ]; then
+          edit_reality_handshake "${tag}"
+        elif [ "${tls_enabled}" = "true" ]; then
+          edit_inbound_certificate "${tag}"
+        else
+          echo "无效选项"; sleep 1
+        fi
+        ;;
+      5)
+        if [ "${reality_enabled}" = "true" ]; then
+          regenerate_reality_keys "${tag}"
+        else
+          echo "无效选项"; sleep 1
+        fi
+        ;;
+      0) return ;;
+      *) echo "无效选项"; sleep 1 ;;
+    esac
+  done
+}
+
 menu_inbound_instance_detail() {
   local tag="$1"
   local typ="$2"
@@ -942,11 +1399,7 @@ menu_inbound_instance_detail() {
     echo "--------------------------------------"
     echo "1. 查看详情"
     echo "2. 导出客户端配置"
-    if [ "${typ}" = "vless" ]; then
-      echo "3. 用户管理"
-    else
-      echo "3. 用户管理（仅 VLESS）"
-    fi
+    echo "3. 修改实例"
     echo "4. 删除实例"
     echo "0. 返回"
     echo
@@ -966,12 +1419,7 @@ menu_inbound_instance_detail() {
         export_inbound_instance_by_tag "${tag}" "${typ}"
         ;;
       3)
-        if [ "${typ}" = "vless" ]; then
-          menu_vless_user_management_for_tag "${tag}"
-        else
-          warn "当前协议暂不支持独立用户管理"
-          pause_enter
-        fi
+        menu_modify_inbound_instance "${tag}" "${typ}"
         ;;
       4)
         delete_inbound_instance_by_tag "${tag}"
