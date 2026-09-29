@@ -102,17 +102,16 @@ validate_stage() {
     die "policy-groups.json 不存在或为空"
   fi
 
-  if need_cmd python3; then
-    python3 - "${stage}/policy-groups.json" <<'PY'
+  python3 - "${stage}/policy-groups.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     json.load(f)
 PY
-  fi
 }
 
 main() {
   [ "$(id -u)" -eq 0 ] || die "请使用 root 运行"
+  need_cmd python3 || die "缺少 python3；sbm 的配置处理依赖 Python 3，请先安装"
 
   echo "==> 安装/升级 sbm"
   echo "仓库: ${REPO}"
