@@ -19,7 +19,7 @@ prompt_required() {
   while true; do
     read -r -p "${prompt}: " input
     [ -n "$input" ] && { printf '%s\n' "$input"; return 0; }
-    echo "此项不能为空"
+    echo "此项不能为空" >&2
   done
 }
 
