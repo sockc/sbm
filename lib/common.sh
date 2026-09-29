@@ -216,9 +216,7 @@ try:
     host = p.hostname or ""
     port = f":{p.port}" if p.port else ""
     netloc = host + port
-    path = p.path
-    if len(path) > 48:
-        path = path[:24] + "…" + path[-16:]
+    path = "/…" if p.path else ""
     print(urlunsplit((p.scheme, netloc, path, "", "")))
 except Exception:
     print("<已隐藏>")
