@@ -143,28 +143,35 @@ save_reality_meta() {
   local meta_file
   meta_file="$(inbound_meta_file_by_tag "${reality_tag}")"
 
-  cat > "${meta_file}" <<JSON
-{
-  "protocol": "vless-reality",
-  "tag": "${reality_tag}",
-  "connect_host": "${connect_host}",
-  "listen_port": ${listen_port},
-  "user_name": "${user_name}",
-  "uuid": "${user_uuid}",
-  "flow": "${flow}",
-  "server_name": "${server_name}",
-  "handshake_server": "${handshake_server}",
-  "handshake_port": ${handshake_port},
-  "public_key": "${public_key}",
-  "private_key": "${private_key}",
-  "short_id": "${short_id}",
-  "tcp_fast_open": "${tcp_fast_open}",
-  "type": "tcp",
-  "security": "reality",
-  "fingerprint": "${DEFAULT_CLIENT_FP}"
+  python3 - "${meta_file}"     "${reality_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${user_uuid}" "${flow}" "${server_name}" "${handshake_server}"     "${handshake_port}" "${public_key}" "${private_key}" "${short_id}"     "${tcp_fast_open}" "${DEFAULT_CLIENT_FP}" <<'PY'
+import json, sys
+(
+    path, tag, host, port, user_name, uuid, flow, server_name,
+    handshake_server, handshake_port, public_key, private_key,
+    short_id, tcp_fast_open, fingerprint
+) = sys.argv[1:]
+data = {
+    "protocol": "vless-reality",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "flow": flow,
+    "server_name": server_name,
+    "handshake_server": handshake_server,
+    "handshake_port": int(handshake_port),
+    "public_key": public_key,
+    "private_key": private_key,
+    "short_id": short_id,
+    "tcp_fast_open": tcp_fast_open,
+    "type": "tcp",
+    "security": "reality",
+    "fingerprint": fingerprint,
 }
-JSON
-
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
   chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
@@ -670,22 +677,25 @@ save_hy2_meta() {
   local meta_file
   meta_file="$(inbound_meta_file_by_tag "${hy2_tag}")"
 
-  cat > "${meta_file}" <<JSON
-{
-  "protocol": "hysteria2",
-  "tag": "${hy2_tag}",
-  "connect_host": "${connect_host}",
-  "listen_port": ${listen_port},
-  "user_name": "${user_name}",
-  "password": "${password}",
-  "server_name": "${server_name}",
-  "cert_mode": "${cert_mode}",
-  "obfs_password": "${obfs_password}",
-  "up_mbps": ${up_mbps},
-  "down_mbps": ${down_mbps}
+  python3 - "${meta_file}"     "${hy2_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${password}" "${server_name}" "${obfs_password}" "${up_mbps}"     "${down_mbps}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, password, server_name, obfs_password, up_mbps, down_mbps, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "hysteria2",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "password": password,
+    "server_name": server_name,
+    "cert_mode": cert_mode,
+    "obfs_password": obfs_password,
+    "up_mbps": int(up_mbps),
+    "down_mbps": int(down_mbps),
 }
-JSON
-
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
   chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
@@ -980,24 +990,27 @@ save_vmess_meta() {
   local meta_file
   meta_file="$(inbound_meta_file_by_tag "${vmess_tag}")"
 
-  cat > "${meta_file}" <<JSON
-{
-  "protocol": "vmess",
-  "tag": "${vmess_tag}",
-  "connect_host": "${connect_host}",
-  "listen_port": ${listen_port},
-  "user_name": "${user_name}",
-  "uuid": "${uuid}",
-  "transport_type": "${transport_type}",
-  "tls_enabled": "${tls_enabled}",
-  "server_name": "${server_name}",
-  "path": "${path}",
-  "host": "${host}",
-  "method": "${method}",
-  "cert_mode": "${cert_mode}"
+  python3 - "${meta_file}"     "${vmess_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${transport_type}" "${tls_enabled}" "${server_name}"     "${path}" "${host}" "${method}" "${cert_mode}" <<'PY'
+import json, sys
+path_out, tag, connect_host, port, user_name, uuid, transport_type, tls_enabled, server_name, ws_path, host, method, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "vmess",
+    "tag": tag,
+    "connect_host": connect_host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "transport_type": transport_type,
+    "tls_enabled": tls_enabled,
+    "server_name": server_name,
+    "path": ws_path,
+    "host": host,
+    "method": method,
+    "cert_mode": cert_mode,
 }
-JSON
-
+with open(path_out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
   chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
@@ -1332,23 +1345,26 @@ save_tuic_meta() {
   local meta_file
   meta_file="$(inbound_meta_file_by_tag "${tuic_tag}")"
 
-  cat > "${meta_file}" <<JSON
-{
-  "protocol": "tuic",
-  "tag": "${tuic_tag}",
-  "connect_host": "${connect_host}",
-  "listen_port": ${listen_port},
-  "user_name": "${user_name}",
-  "uuid": "${uuid}",
-  "password": "${password}",
-  "server_name": "${server_name}",
-  "congestion_control": "${congestion_control}",
-  "zero_rtt_handshake": "${zero_rtt_handshake}",
-  "heartbeat": "${heartbeat}",
-  "cert_mode": "${cert_mode}"
+  python3 - "${meta_file}"     "${tuic_tag}" "${connect_host}" "${listen_port}" "${user_name}"     "${uuid}" "${password}" "${server_name}" "${congestion_control}"     "${zero_rtt_handshake}" "${heartbeat}" "${cert_mode}" <<'PY'
+import json, sys
+path, tag, host, port, user_name, uuid, password, server_name, congestion, zero_rtt, heartbeat, cert_mode = sys.argv[1:]
+data = {
+    "protocol": "tuic",
+    "tag": tag,
+    "connect_host": host,
+    "listen_port": int(port),
+    "user_name": user_name,
+    "uuid": uuid,
+    "password": password,
+    "server_name": server_name,
+    "congestion_control": congestion,
+    "zero_rtt_handshake": zero_rtt,
+    "heartbeat": heartbeat,
+    "cert_mode": cert_mode,
 }
-JSON
-
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
   chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
@@ -1645,9 +1661,7 @@ PY
 }
 
 anytls_meta_file_by_tag() {
-  local tag="$1"
-  mkdir -p "${INBOUND_META_DIR}"
-  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${tag}"
+  inbound_meta_file_by_tag "$1"
 }
 
 save_anytls_meta() {
@@ -2056,9 +2070,7 @@ menu_deploy_anytls() {
 }
 
 vless_meta_file_by_tag() {
-  local tag="$1"
-  mkdir -p "${INBOUND_META_DIR}"
-  printf '%s/%s.json\n' "${INBOUND_META_DIR}" "${tag}"
+  inbound_meta_file_by_tag "$1"
 }
 
 save_vless_meta() {
@@ -2355,19 +2367,22 @@ save_direct_relay_meta() {
   local meta_file
   meta_file="$(inbound_meta_file_by_tag "${relay_tag}")"
 
-  cat > "${meta_file}" <<JSON
-{
-  "protocol": "direct-relay",
-  "tag": "${relay_tag}",
-  "listen": "${listen_addr}",
-  "listen_port": ${listen_port},
-  "network": "${network}",
-  "target_host": "${target_host}",
-  "target_port": ${target_port},
-  "route_outbound": "${route_outbound}"
+  python3 - "${meta_file}"     "${relay_tag}" "${listen_addr}" "${listen_port}" "${network}"     "${target_host}" "${target_port}" "${route_outbound}" <<'PY'
+import json, sys
+path, tag, listen, listen_port, network, target_host, target_port, route_outbound = sys.argv[1:]
+data = {
+    "protocol": "direct-relay",
+    "tag": tag,
+    "listen": listen,
+    "listen_port": int(listen_port),
+    "network": network,
+    "target_host": target_host,
+    "target_port": int(target_port),
+    "route_outbound": route_outbound,
 }
-JSON
-
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+PY
   chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
