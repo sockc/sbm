@@ -645,9 +645,8 @@ for ib in cfg.get("inbounds", []):
     else:
         endpoint = f"{listen}:{port}" if port else (listen or "<空>")
 
-    users = ib.get("users", [])
-    user_count = len(users) if isinstance(users, list) else 0
-    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{user_count}")
+    network = "udp" if typ in ("hysteria2", "tuic") else "tcp"
+    print(f"{n}\t{tag}\t{typ}\t{label_for(ib)}\t{endpoint}\t{network}\t{port}")
 PY
 }
 
@@ -657,26 +656,51 @@ managed_inbound_count() {
 
 show_managed_inbound_list() {
   local service_state="inactive"
+  local config_ok="false"
+
   if command -v systemctl >/dev/null 2>&1; then
     service_state="$(systemctl is-active sing-box.service 2>/dev/null || true)"
   fi
 
+  if check_config_file "${CONFIG_DIR}/config.json" >/dev/null 2>&1; then
+    config_ok="true"
+  fi
+
   echo "当前入站实例："
-  echo "编号 标签                     类型              监听地址                 用户"
-  echo "--------------------------------------------------------------------------------"
+  echo "编号 标签                     类型              监听地址                 状态"
+  echo "--------------------------------------------------------------------------------------"
 
   local found=0
-  while IFS=$'\t' read -r n tag _type label endpoint users; do
+  while IFS=$'\t' read -r n tag _type label endpoint network port; do
     [ -z "${n}" ] && continue
     found=1
-    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${users}"
+
+    local status rc
+    if [ "${config_ok}" != "true" ]; then
+      status="配置异常"
+    elif [ "${service_state}" != "active" ]; then
+      status="服务停止"
+    else
+      if inbound_port_is_listening "${network}" "${port}"; then
+        status="正常"
+      else
+        rc=$?
+        if [ "${rc}" -eq 2 ]; then
+          status="未知"
+        else
+          status="未监听"
+        fi
+      fi
+    fi
+
+    printf '%-4s %-24s %-17s %-24s %s\n' "${n}" "${tag}" "${label}" "${endpoint}" "${status}"
   done < <(managed_inbound_rows)
 
   if [ "${found}" -eq 0 ]; then
     echo "<暂无 SBM 管理的入站实例>"
   fi
 
-  echo "--------------------------------------------------------------------------------"
+  echo "--------------------------------------------------------------------------------------"
   echo "sing-box 服务：${service_state:-unknown}"
 }
 
