@@ -53,6 +53,27 @@ fetch_text() {
   return 1
 }
 
+get_remote_commit_sha() {
+  get_install_source
+
+  local url json
+  url="https://api.github.com/repos/${SBM_REPO_LOCAL}/commits/${SBM_BRANCH_LOCAL}"
+  json="$(fetch_text "${url}" 2>/dev/null)" || return 1
+
+  if has_cmd python3; then
+    REMOTE_COMMIT_JSON="${json}" python3 - <<'PY'
+import json, os
+data = json.loads(os.environ["REMOTE_COMMIT_JSON"])
+sha = str(data.get("sha", "") or "")
+if len(sha) < 40:
+    raise SystemExit(1)
+print(sha)
+PY
+  else
+    printf '%s\n' "${json}" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n1
+  fi
+}
+
 get_remote_sbm_version() {
   get_install_source
 
@@ -79,7 +100,18 @@ show_self_update_info() {
 
   echo "当前脚本版本 : ${SBM_VERSION}"
   echo "安装来源仓库 : ${SBM_REPO_LOCAL}"
+  local remote_sha installed_ref
+  remote_sha="$(get_remote_commit_sha 2>/dev/null || true)"
+  installed_ref="${SBM_INSTALLED_REF:-}"
+  if [ -f "${BASE_DIR}/install.env" ]; then
+    # shellcheck disable=SC1090
+    source "${BASE_DIR}/install.env"
+    installed_ref="${SBM_INSTALLED_REF:-${installed_ref}}"
+  fi
+
   echo "安装来源分支 : ${SBM_BRANCH_LOCAL}"
+  echo "当前固定提交 : ${installed_ref:-旧版本未记录}"
+  echo "远端最新提交 : ${remote_sha:-获取失败}"
   echo "远端脚本版本 : ${remote_ver:-获取失败}"
 }
 
@@ -88,13 +120,21 @@ run_self_update() {
   mkdir -p "${TMP_DIR}"
   get_install_source
 
-  local tmp_installer url
-  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${SBM_BRANCH_LOCAL}/install.sh"
+  local tmp_installer url remote_sha
+  remote_sha="$(get_remote_commit_sha 2>/dev/null || true)"
+  if [ -z "${remote_sha}" ]; then
+    err "无法解析远端分支对应的固定 commit，已停止更新"
+    pause_enter
+    return 1
+  fi
+
+  url="https://raw.githubusercontent.com/${SBM_REPO_LOCAL}/${remote_sha}/install.sh"
   tmp_installer="${TMP_DIR}/sbm-install.sh"
 
   echo "准备从以下来源更新脚本："
   echo "仓库: ${SBM_REPO_LOCAL}"
   echo "分支: ${SBM_BRANCH_LOCAL}"
+  echo "固定提交: ${remote_sha}"
   echo
 
   if ! confirm_default_yes "确认执行脚本自更新吗？"; then
@@ -113,9 +153,15 @@ run_self_update() {
     return 1
   fi
 
-  chmod +x "${tmp_installer}"
+  chmod 700 "${tmp_installer}"
 
-  if REPO="${SBM_REPO_LOCAL}" BRANCH="${SBM_BRANCH_LOCAL}" bash "${tmp_installer}"; then
+  if ! bash -n "${tmp_installer}"; then
+    err "下载到的 install.sh 语法检查失败，已停止更新"
+    pause_enter
+    return 1
+  fi
+
+  if REPO="${SBM_REPO_LOCAL}" BRANCH="${SBM_BRANCH_LOCAL}" REF="${remote_sha}" bash "${tmp_installer}"; then
     ok "脚本自更新完成"
   else
     err "脚本自更新失败"
