@@ -32,6 +32,8 @@ source "${BASE_DIR}/lib/self_update.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/clash_api.sh"
 # shellcheck disable=SC1091
+source "${BASE_DIR}/lib/web_panel.sh"
+# shellcheck disable=SC1091
 source "${BASE_DIR}/lib/template.sh"
 # shellcheck disable=SC1091
 source "${BASE_DIR}/lib/outbound_wizard.sh"
