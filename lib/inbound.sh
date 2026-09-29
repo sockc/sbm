@@ -121,9 +121,7 @@ prompt_listen_port() {
 }
 
 restart_singbox_service() {
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable sing-box >/dev/null 2>&1 || true
-  systemctl restart sing-box
+  restart_singbox_service_safe
 }
 
 save_reality_meta() {
@@ -462,6 +460,7 @@ prompt_port_default() {
 
 ensure_inbound_meta_dir() {
   mkdir -p "${INBOUND_META_DIR}"
+  chmod 700 "${INBOUND_META_DIR}" 2>/dev/null || true
 }
 
 inbound_meta_name_by_tag() {
@@ -1714,6 +1713,7 @@ data = {
 with open(path, "w", encoding="utf-8") as f:
   json.dump(data, f, ensure_ascii=False, indent=2)
 PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 generate_anytls_self_signed_cert() {
@@ -2123,6 +2123,7 @@ data = {
 with open(path, "w", encoding="utf-8") as f:
   json.dump(data, f, ensure_ascii=False, indent=2)
 PY
+  chmod 600 "${meta_file}" 2>/dev/null || true
 }
 
 generate_vless_self_signed_cert() {
