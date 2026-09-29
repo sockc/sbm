@@ -30,6 +30,7 @@ FILES=(
   "lib/web_panel.sh"
   "lib/template.sh"
   "lib/outbound_wizard.sh"
+  "lib/outbound_ui.sh"
   "lib/uninstall.sh"
   "lib/system_proxy.sh"
   "lib/realm_relay.sh"
