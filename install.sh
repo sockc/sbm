@@ -64,8 +64,6 @@ resolve_source_ref() {
 
   local meta_file sha
   meta_file="$(mktemp "/tmp/sbm-ref.XXXXXX")"
-  trap 'rm -f "${meta_file}"' RETURN
-
   if ! fetch_to "https://api.github.com/repos/${REPO}/commits/${REF}" "${meta_file}"; then
     die "无法把来源 ${REF} 解析为固定 commit"
   fi
@@ -83,7 +81,6 @@ PY
   fi
 
   rm -f "${meta_file}"
-  trap - RETURN
 
   if ! [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
     die "GitHub 返回的 commit SHA 无效"
