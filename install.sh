@@ -28,6 +28,7 @@ FILES=(
   "lib/self_update.sh"
   "lib/clash_api.sh"
   "lib/template.sh"
+  "lib/outbound_wizard.sh"
   "lib/uninstall.sh"
   "lib/system_proxy.sh"
   "lib/realm_relay.sh"
