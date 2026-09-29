@@ -5,6 +5,7 @@ umask 077
 REPO="${REPO:-sockc/sbm}"
 BRANCH="${BRANCH:-main}"
 REF="${REF:-${BRANCH}}"
+SOURCE_REF=""
 
 INSTALL_DIR="/usr/local/share/sbm"
 BIN_PATH="/usr/local/sbin/sbm"
@@ -55,6 +56,42 @@ fetch_to() {
   fi
 }
 
+resolve_source_ref() {
+  if [[ "${REF}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    SOURCE_REF="${REF,,}"
+    return 0
+  fi
+
+  local meta_file sha
+  meta_file="$(mktemp "/tmp/sbm-ref.XXXXXX")"
+  trap 'rm -f "${meta_file}"' RETURN
+
+  if ! fetch_to "https://api.github.com/repos/${REPO}/commits/${REF}" "${meta_file}"; then
+    die "无法把来源 ${REF} 解析为固定 commit"
+  fi
+
+  if need_cmd python3; then
+    sha="$(python3 - "${meta_file}" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+print(str(data.get("sha", "") or ""))
+PY
+)"
+  else
+    sha="$(sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' "${meta_file}" | head -n1)"
+  fi
+
+  rm -f "${meta_file}"
+  trap - RETURN
+
+  if ! [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    die "GitHub 返回的 commit SHA 无效"
+  fi
+
+  SOURCE_REF="${sha,,}"
+}
+
 validate_stage() {
   local stage="$1"
   local file
@@ -84,6 +121,9 @@ main() {
   echo "仓库: ${REPO}"
   echo "来源: ${REF}"
 
+  resolve_source_ref
+  echo "固定提交: ${SOURCE_REF}"
+
   mkdir -p "${PARENT_DIR}" "$(dirname "${BIN_PATH}")"
 
   local stage old_dir file
@@ -102,13 +142,13 @@ main() {
   fi
 
   for file in "${FILES[@]}"; do
-    fetch_to "https://raw.githubusercontent.com/${REPO}/${REF}/${file}" "${stage}/${file}"
+    fetch_to "https://raw.githubusercontent.com/${REPO}/${SOURCE_REF}/${file}" "${stage}/${file}"
     chmod 755 "${stage}/${file}"
   done
 
   # 用户已经自定义过策略文件时不覆盖；首次安装才从仓库获取。
   if [ ! -f "${stage}/policy-groups.json" ]; then
-    fetch_to "https://raw.githubusercontent.com/${REPO}/${REF}/policy-groups.json" "${stage}/policy-groups.json"
+    fetch_to "https://raw.githubusercontent.com/${REPO}/${SOURCE_REF}/policy-groups.json" "${stage}/policy-groups.json"
   fi
   chmod 600 "${stage}/policy-groups.json" 2>/dev/null || true
 
@@ -117,7 +157,7 @@ main() {
   cat > "${stage}/install.env" <<EOF
 SBM_REPO="${REPO}"
 SBM_BRANCH="${BRANCH}"
-SBM_INSTALLED_REF="${REF}"
+SBM_INSTALLED_REF="${SOURCE_REF}"
 EOF
   chmod 600 "${stage}/install.env"
 
