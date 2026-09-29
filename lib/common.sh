@@ -25,7 +25,7 @@ acquire_sbm_lock() {
   fi
 
   if has_cmd flock; then
-    if ! eval 'exec 9>"${lock_file}"'; then
+    if ! { exec 9>"${lock_file}"; }; then
       err "无法创建 sbm 锁文件：${lock_file}"
       return 1
     fi
