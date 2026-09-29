@@ -154,8 +154,13 @@ main() {
   old_dir="${PARENT_DIR}/.sbm.old.$$"
 
   cleanup() {
-    [ -d "${stage:-}" ] && rm -rf -- "${stage}"
-    [ -d "${old_dir:-}" ] && rm -rf -- "${old_dir}"
+    if [ -n "${stage:-}" ] && [ -d "${stage}" ]; then
+      rm -rf -- "${stage}" 2>/dev/null || true
+    fi
+    if [ -n "${old_dir:-}" ] && [ -d "${old_dir}" ]; then
+      rm -rf -- "${old_dir}" 2>/dev/null || true
+    fi
+    return 0
   }
   trap cleanup EXIT
 
